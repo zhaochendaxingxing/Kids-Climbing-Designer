@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Button, Tooltip, Divider, Select } from 'antd';
+import { Button, Tooltip, Divider } from 'antd';
 import {
   UndoOutlined,
   RedoOutlined,
@@ -18,7 +18,6 @@ import {
 import { useStore } from '@/store/useStore';
 import { PART_COLORS } from '@/data/parts';
 
-const { Option } = Select;
 
 interface ToolbarProps {
   onSave: () => void;

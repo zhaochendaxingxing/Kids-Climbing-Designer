@@ -929,7 +929,6 @@ export const useStore = create<StoreState>((set, get) => ({
     const len = def.barSpec?.length ?? def.size.width;
     const euler = new THREE.Euler(part.rotation[0], part.rotation[1], part.rotation[2]);
     const quat = new THREE.Quaternion().setFromEuler(euler);
-    const dir = new THREE.Vector3(1, 0, 0).applyQuaternion(quat).normalize();
     const pos = new THREE.Vector3(part.position[0], part.position[1], part.position[2]);
     const half = len / 2;
     const half15 = 7.5; // 15cm 杆半长

@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { useStore } from '@/store/useStore';
-import { getPartById, PARTS_LIBRARY, PART_COLORS } from '@/data/parts';
+import { getPartById, PARTS_LIBRARY } from '@/data/parts';
 
 interface RadialMenuProps {
   position: { x: number; y: number } | null;
@@ -119,7 +119,7 @@ export default function RadialMenu({ position, onClose }: RadialMenuProps) {
   ];
 
   // 确定当前显示的菜单项（替换菜单改用独立垂直滚动列表，不再走扇形）
-  let displayItems = mainItems;
+  const displayItems = mainItems;
 
   // 方向字符串转向量
   const dirToVector = (dir: string): [number, number, number] => {

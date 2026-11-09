@@ -332,7 +332,7 @@ function PartsSummary() {
   const exportJSON = useStore((state) => state.exportJSON);
   const exportCSV = useStore((state) => state.exportCSV);
 
-  const summary = useMemo(() => getPartsSummary(), [getPartsSummary, parts]);
+  const summary = useMemo(() => parts.length === 0 ? [] : getPartsSummary(), [getPartsSummary, parts]);
   const totalCount = useMemo(() => summary.reduce((sum, i) => sum + i.count, 0), [summary]);
 
   const groupedByCategory = useMemo(() => {
@@ -588,8 +588,6 @@ function ProjectsPanel() {
 function DiffPanel() {
   const viewMode = useStore((state) => state.viewMode);
   const diffResult = useStore((state) => state.diffResult);
-  const diffProjectId = useStore((state) => state.diffProjectId);
-  const exitCompare = useStore((state) => state.exitCompare);
 
   if (viewMode !== 'diff' || !diffResult) {
     return (

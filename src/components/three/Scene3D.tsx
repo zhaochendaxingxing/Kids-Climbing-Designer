@@ -8,6 +8,34 @@ import { useStore, collectGroupPartIds, getTopGroupOf } from '@/store/useStore';
 import { PlacedPart, PartDefinition, SceneGroup } from '@/types/parts';
 import { PART_COLORS, CONNECTOR_COLORS, PARTS_LIBRARY, getPartById, COMBO_45L, NEST_SOCKET_OUTER_DIAMETER, NEST_SOCKET_INNER_DIAMETER, NEST_SOCKET_LENGTH } from '@/data/parts';
 
+type DesignerState = ReturnType<typeof useStore.getState>;
+
+interface SceneContextMenu {
+  x: number;
+  y: number;
+  ids: string[];
+}
+
+interface SceneRuntime {
+  scene: THREE.Scene;
+  camera: THREE.PerspectiveCamera;
+  renderer: THREE.WebGLRenderer;
+  controls: OrbitControls;
+  ground: THREE.Mesh;
+  gridHelper: THREE.GridHelper;
+  partsGroup: THREE.Group;
+  gizmo: THREE.Group;
+  raycaster: THREE.Raycaster;
+  pointer: THREE.Vector2;
+}
+
+declare global {
+  interface Window {
+    __debugLog?: (message: string) => void;
+    __sceneCtxMenu?: (payload: SceneContextMenu) => void;
+  }
+}
+
 const AXIS_LENGTH = 40;
 const SNAP_DIST = 10;
 
@@ -280,7 +308,7 @@ function buildExtensionMesh(
   }
   if (ext === 'rainbow') {
     // 彩虹门：多彩竖条织带扉
-    const w = dims.w, d = dims.d;
+    const w = dims.w;
     const colors = ['#FF5A5A', '#F7CA45', '#26C281', '#4A90D9', '#B19CD9'];
     const stripeW = 4;
     const count = Math.floor(w / stripeW);
@@ -754,7 +782,7 @@ function findFreeSpawn(
   src: PlacedPart,
   def: PartDefinition | undefined,
   base: [number, number, number],
-  st: any,
+  st: DesignerState,
   excludeId = ''
 ): [number, number, number] {
   const w = (def ? def.size.width : 20) + 6;
@@ -838,7 +866,7 @@ function getSelAABB(parts: PlacedPart[]): THREE.Box3 | null {
 }
 
 // Alt 复制幽灵：被拖拽的原物体在与副本（或其他部件）仍有体积碰撞时显示红色半透明，脱离碰撞后变回实体
-function updateGhostHighlight(st: any, ds: any) {
+function updateGhostHighlight(st: DesignerState, ds: { ghostActive: boolean; dragPartId: string | null }) {
   if (!ds.ghostActive || !ds.dragPartId) return;
   const dragged = st.parts.find((p: PlacedPart) => p.id === ds.dragPartId);
   if (!dragged) {
@@ -1610,7 +1638,6 @@ function createGizmo(): THREE.Group {
       const y = radius * Math.sin(angle);
       points.push(new THREE.Vector3(x, y, 0));
     }
-    const arcGeo = new THREE.BufferGeometry().setFromPoints(points);
 
     // 使用细管状几何体让弧线可点击
     const tubePoints = points.map(p => p.clone());
@@ -1633,12 +1660,13 @@ function createGizmo(): THREE.Group {
   return gizmo;
 }
 
+// 旋转视角模式的鼠标光标（旋转箭头图标）
+const ROTATE_CURSOR_SVG = `<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='#4A90D9' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'><path d='M20 11a8 8 0 1 0-2.34 5.66'/><path d='M20 4v7h-7'/></svg>`;
+const ROTATE_CURSOR = `url("data:image/svg+xml;utf8,${encodeURIComponent(ROTATE_CURSOR_SVG)}") 12 12, grab`;
+
 export default function Scene3D() {
-  // 旋转视角模式的鼠标光标（旋转箭头图标）
-  const ROTATE_CURSOR_SVG = `<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='#4A90D9' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'><path d='M20 11a8 8 0 1 0-2.34 5.66'/><path d='M20 4v7h-7'/></svg>`;
-  const ROTATE_CURSOR = `url("data:image/svg+xml;utf8,${encodeURIComponent(ROTATE_CURSOR_SVG)}") 12 12, grab`;
   const containerRef = useRef<HTMLDivElement>(null);
-  const sceneRef = useRef<any>(null);
+  const sceneRef = useRef<SceneRuntime | null>(null);
   const gizmoRef = useRef<THREE.Group | null>(null);
   const selectedMarkerRef = useRef<THREE.Mesh | null>(null);
   const selBoxRef = useRef<THREE.LineSegments | null>(null);
@@ -1660,6 +1688,18 @@ export default function Scene3D() {
   // 操作轴旁边的"组信息"标签：用于展示/重命名组、快捷取消成组
   const groups = useStore((s) => s.groups);
   const parts = useStore((s) => s.parts);
+  const draggingPart = useStore((state) => state.draggingPart);
+  const ghostCopyId = useStore((state) => state.ghostCopyId);
+  const ghostPosition = useStore((state) => state.ghostPosition);
+  const gizmoMode = useStore((state) => state.gizmoMode);
+  const hoveredPartId = useStore((state) => state.hoveredPartId);
+  const navMode = useStore((state) => state.navMode);
+  const paintColor = useStore((state) => state.paintColor);
+  const pendingPreset = useStore((state) => state.pendingPreset);
+  const releaseTick = useStore((state) => state.releaseTick);
+  const selectedIds = useStore((state) => state.selectedIds);
+  const selectedPartId = useStore((state) => state.selectedPartId);
+  const workflow = useStore((state) => state.workflow);
   // 当前选中的顶层单元全部落在同一个成组内（成组物体不显示扩展幽灵，给出解组提示）
   const selGroupedHint = useStore((s) => {
     if (s.selectedIds.length === 0) return false;
@@ -1693,10 +1733,10 @@ export default function Scene3D() {
 
   // 暴露给 3D 事件回调的右键菜单入口
   useEffect(() => {
-    (window as any).__sceneCtxMenu = (payload: { x: number; y: number; ids: string[] }) => {
+    window.__sceneCtxMenu = (payload: { x: number; y: number; ids: string[] }) => {
       setCtxMenu({ x: payload.x, y: payload.y, ids: [...payload.ids] });
     };
-    return () => { (window as any).__sceneCtxMenu = undefined; };
+    return () => { window.__sceneCtxMenu = undefined; };
   }, []);
 
   // 初始化场景
@@ -1728,9 +1768,9 @@ export default function Scene3D() {
     controls.minDistance = 30;
     controls.maxDistance = 2500;
     // 左键留给场景交互（选中/拖拽/放置），右键负责视角转动，中键缩放
-    (controls.mouseButtons as any).LEFT = -1;
-    (controls.mouseButtons as any).MIDDLE = THREE.MOUSE.ROTATE;
-    (controls.mouseButtons as any).RIGHT = -1;
+    controls.mouseButtons.LEFT = null;
+    controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
+    controls.mouseButtons.RIGHT = null;
 
     // 灯光
     const ambient = new THREE.AmbientLight(0xffffff, 0.85);
@@ -1946,7 +1986,7 @@ export default function Scene3D() {
       group.userData.partId = part.id;
       partsGroup.add(group);
     });
-  }, [useStore((s) => s.parts), useStore((s) => s.selectedIds), useStore((s) => s.hoveredPartId), useStore((s) => s.ghostCopyId)]);
+  }, [parts, selectedIds, hoveredPartId, ghostCopyId]);
 
   // 幽灵预览（点击配件库后，在场景中显示半透明预览）
   useEffect(() => {
@@ -1999,7 +2039,7 @@ export default function Scene3D() {
     ghost.userData.isGhost = true;
     ref.scene.add(ghost);
     ghostGroupRef.current = ghost;
-  }, [useStore((s) => s.draggingPart), useStore((s) => s.pendingPreset)]);
+  }, [draggingPart, pendingPreset]);
 
   // 幽灵预览位置跟随
   useEffect(() => {
@@ -2007,10 +2047,10 @@ export default function Scene3D() {
     if (ghostGroupRef.current && ghostPos) {
       ghostGroupRef.current.position.set(ghostPos[0], ghostPos[1], ghostPos[2]);
     }
-  }, [useStore((s) => s.ghostPosition)]);
+  }, [ghostPosition]);
 
   // 平台板幽灵：生长模式下，光标附近存在可落平台的矩形杆框架时在其顶面显示半透明平台板
-  const clearPlatformGhost = () => {
+  const clearPlatformGhost = useCallback(() => {
     const sc = sceneRef.current?.scene;
     if (platGhostGroupRef.current) {
       if (sc) sc.remove(platGhostGroupRef.current);
@@ -2019,8 +2059,8 @@ export default function Scene3D() {
     }
     platGhostDataRef.current = null;
     platGhostPartIdRef.current = null;
-  };
-  const updatePlatformGhost = (cursor: THREE.Vector3) => {
+  }, []);
+  const updatePlatformGhost = useCallback((cursor: THREE.Vector3) => {
     const st = useStore.getState();
     const sc = sceneRef.current?.scene;
     if (!sc) return;
@@ -2094,7 +2134,7 @@ export default function Scene3D() {
     platGhostGroupRef.current = outer;
     platGhostDataRef.current = { position: fit.position, rotation: fit.rotation };
     platGhostPartIdRef.current = fit.partId;
-  };
+  }, [clearPlatformGhost]);
 
   // 端点扩展幽灵：选中单个独立杆件/连接件时，在其空闲扩展端显示半透明待部署元件
   useEffect(() => {
@@ -2159,17 +2199,18 @@ export default function Scene3D() {
     ref.scene.add(outer);
     extGhostGroupRef.current = outer;
     setExtCount(entries.length);
-    (window as any).__debugLog?.(`🔷 端点扩展幽灵 × ${entries.length}`);
+    window.__debugLog?.(`🔷 端点扩展幽灵 × ${entries.length}`);
   }, [
-    useStore((s) => s.parts),
-    useStore((s) => s.selectedIds),
-    useStore((s) => s.selectedPartId),
-    useStore((s) => s.draggingPart),
-    useStore((s) => s.pendingPreset),
-    useStore((s) => s.releaseTick),
-    useStore((s) => s.gizmoMode),
-    useStore((s) => s.paintColor),
-    useStore((s) => s.workflow),
+    parts,
+    selectedIds,
+    selectedPartId,
+    draggingPart,
+    pendingPreset,
+    releaseTick,
+    gizmoMode,
+    paintColor,
+    workflow,
+    clearPlatformGhost,
   ]);
 
   // 更新选中标记和操作轴
@@ -2179,7 +2220,7 @@ export default function Scene3D() {
     const marker = selectedMarkerRef.current;
     const gizmo = gizmoRef.current;
     if (!marker || !gizmo) return;
-    let state = useStore.getState();
+    const state = useStore.getState();
     // 判断当前选中是否落在同一个多成员组内 → 当作"组物件"选中，显示组信息标签
     const rawSel = state.selectedIds;
     if (rawSel.length > 0) {
@@ -2254,7 +2295,7 @@ export default function Scene3D() {
       const selFill = selFillRef.current;
       if (selFill) selFill.visible = false;
     }
-  }, [useStore((s) => s.selectedPartId), useStore((s) => s.selectedIds), useStore((s) => s.parts), useStore((s) => s.gizmoMode), useStore((s) => s.paintColor)]);
+  }, [selectedPartId, selectedIds, parts, gizmoMode, paintColor]);
 
   // 视角导航模式：pan=左键拖拽平移 / rotate=左键拖拽旋转，并切换鼠标光标
   useEffect(() => {
@@ -2262,14 +2303,14 @@ export default function Scene3D() {
     const container = containerRef.current;
     const vm = useStore.getState().navMode;
     if (ref && ref.controls) {
-      (ref.controls.mouseButtons as any).LEFT = vm === 'pan' ? THREE.MOUSE.PAN : vm === 'rotate' ? THREE.MOUSE.ROTATE : -1;
+      ref.controls.mouseButtons.LEFT = vm === 'pan' ? THREE.MOUSE.PAN : vm === 'rotate' ? THREE.MOUSE.ROTATE : null;
     }
     if (container) {
       if (vm === 'pan') container.style.cursor = 'grab';
       else if (vm === 'rotate') container.style.cursor = ROTATE_CURSOR;
       else container.style.cursor = '';
     }
-  }, [useStore((s) => s.navMode)]);
+  }, [navMode]);
 
   // 鼠标事件
   useEffect(() => {
@@ -2324,7 +2365,7 @@ export default function Scene3D() {
       // 油漆桶上色模式：点击可着色元件（杆件/平台板）直接染色
       if (state.paintColor) {
         const paintMeshes: THREE.Mesh[] = [];
-        ref.partsGroup.children.forEach((g: THREE.Group) => {
+        ref.partsGroup.children.forEach((g) => {
           g.children.forEach((c) => {
             if (c instanceof THREE.Mesh) paintMeshes.push(c);
           });
@@ -2336,7 +2377,7 @@ export default function Scene3D() {
           const part = pid ? state.parts.find((x: PlacedPart) => x.id === pid) : undefined;
           const def = part ? getPartById(part.partId) : undefined;
           if (part && def && (def.category === 'bar' || def.category === 'platform')) {
-            state.paintPart(pid, state.paintColor);
+            state.paintPart(part.id, state.paintColor);
           }
         }
         return; // 上色模式下不响应选中/拖拽/操作轴等
@@ -2360,10 +2401,9 @@ export default function Scene3D() {
               if (dupSel.length === 0) { controls.enabled = true; return; }
             }
             const hit = gizmoIntersects[0].object;
-            const log = (window as any).__debugLog;
             if (hit.userData.isAxis) {
               const axisName = hit.userData.axisDir ? (hit.userData.axisDir.x ? 'X' : hit.userData.axisDir.y ? 'Y' : 'Z') : '?';
-              (window as any).__debugLog?.(`🔴 点中轴箭头: ${axisName}轴`);
+              window.__debugLog?.(`🔴 点中轴箭头: ${axisName}轴`);
               // 沿轴移动 — 使用相机朝向平面 + 初始位置追踪
               const part = state.parts.find((p: PlacedPart) => p.id === state.selectedPartId);
               if (part) {
@@ -2389,7 +2429,7 @@ export default function Scene3D() {
               ds.planePos = null;
               return;
             } else if (hit.userData.isPlane) {
-              (window as any).__debugLog?.(`🔴 点中平面: ${hit.userData.planeNormal ? (hit.userData.planeNormal.x ? 'XZ' : hit.userData.planeNormal.y ? 'XY' : 'YZ') : '?'}平面`);
+              window.__debugLog?.(`🔴 点中平面: ${hit.userData.planeNormal ? (hit.userData.planeNormal.x ? 'XZ' : hit.userData.planeNormal.y ? 'XY' : 'YZ') : '?'}平面`);
               // 沿平面移动
               ds.isDown = true;
               ds.isDragging = true;
@@ -2399,7 +2439,7 @@ export default function Scene3D() {
               ds.planePos = hit.userData.planePos.clone();
               return;
             } else if (hit.userData.isArc) {
-              (window as any).__debugLog?.(`🔴 点中旋转弧线: ${hit.userData.arcAxis || '?'}轴`);
+              window.__debugLog?.(`🔴 点中旋转弧线: ${hit.userData.arcAxis || '?'}轴`);
               // 拖拽旋转（替换立即旋转45°）
               const axisDir = new THREE.Vector3(
                 hit.userData.arcAxis === 'x' ? 1 : 0,
@@ -2444,7 +2484,7 @@ export default function Scene3D() {
                   ds.isArc = true;
                   ds.startQuat = new THREE.Quaternion().setFromEuler(new THREE.Euler(part.rotation[0], part.rotation[1], part.rotation[2]));
                   ds.startAngle = startAngle;
-                  (window as any).__debugLog?.(`🔄 开始旋转拖拽: startAngle=${(startAngle * 180 / Math.PI).toFixed(1)}°`);
+                  window.__debugLog?.(`🔄 开始旋转拖拽: startAngle=${(startAngle * 180 / Math.PI).toFixed(1)}°`);
                   return;
                 }
               }
@@ -2464,7 +2504,7 @@ export default function Scene3D() {
           const added = st.addPart(platGhostPartIdRef.current || 'platform-39.5x39.5', md.position, md.rotation, undefined, false, true);
           if (added) {
             st.setSelection([added.id], added.id);
-            (window as any).__debugLog?.(`🟩 平台板自动部署: → 实体 #${st.parts.length}`);
+            window.__debugLog?.(`🟩 平台板自动部署: → 实体 #${st.parts.length}`);
           }
           clearPlatformGhost();
           controls.enabled = true;
@@ -2489,7 +2529,7 @@ export default function Scene3D() {
             const added = st.addPart(entry.partId, entry.position, entry.rotation, undefined, false, true);
             if (added) {
               st.setSelection([added.id], added.id);
-              (window as any).__debugLog?.(`🟢 端点扩展部署: ${entry.partId} → 实体 #${st.parts.length}`);
+              window.__debugLog?.(`🟢 端点扩展部署: ${entry.partId} → 实体 #${st.parts.length}`);
             }
             controls.enabled = true;
             return;
@@ -2499,26 +2539,25 @@ export default function Scene3D() {
 
       // 检查部件点击
       const allMeshes: THREE.Mesh[] = [];
-      ref.partsGroup.children.forEach((g: THREE.Group) => {
+      ref.partsGroup.children.forEach((g) => {
         g.children.forEach((c) => {
           if (c instanceof THREE.Mesh) allMeshes.push(c);
         });
       });
       const partIntersects = raycaster.intersectObjects(allMeshes);
       if (partIntersects.length > 0) {
-        let hit = partIntersects[0].object;
-        let partGroup = hit.parent;
+        const hit = partIntersects[0].object;
+        const partGroup = hit.parent;
         if (partGroup && partGroup.userData.partId) {
           const partId = partGroup.userData.partId;
 
           // 全选同类已改为顶部分类菜单选择（不再走场景点选），此处直接进入常规选中逻辑
-          (window as any).__debugLog?.(`🟦 选中部件: ${partId}`);
+          window.__debugLog?.(`🟦 选中部件: ${partId}`);
 
           // Alt + 点击：在原位生成一个副本（静止不动），被拖拽的原物体成为“幽灵”，重合时红色半透明，脱离碰撞后变实体
           if (e.altKey && !state.draggingPart) {
             const src = state.parts.find((p: PlacedPart) => p.id === partId);
             if (src) {
-              const def = getPartById(src.partId);
               // 复制视为一次操作（历史记录一次），之后的拖拽不再额外记录
               state._pushHistory();
               ds.historyPushed = true;
@@ -2541,7 +2580,7 @@ export default function Scene3D() {
               ds.ghostActive = true;
               ds.ghostSrcId = src.id;
               ds.anchorCopyId = copied.id; // 原位静止副本，用于碰撞判定
-              (window as any).__debugLog?.(`📋 Alt 复制(幽灵): 原物 ${src.id} 被拖拽，副本 ${copied.id} 静止原位`);
+              window.__debugLog?.(`📋 Alt 复制(幽灵): 原物 ${src.id} 被拖拽，副本 ${copied.id} 静止原位`);
               return;
             }
           }
@@ -2599,14 +2638,14 @@ export default function Scene3D() {
               }
             }
           }
-          (window as any).__debugLog?.(`✅ 已部署模块「${preset.name}」 @ (${dropPos[0]}, ${dropPos[2]})`);
+          window.__debugLog?.(`✅ 已部署模块「${preset.name}」 @ (${dropPos[0]}, ${dropPos[2]})`);
           return;
         }
         if (state.draggingPart) {
           const def = getPartById(state.draggingPart.partId);
           // 增加框架(frame)阶段只允许放置/生长杆件与连接件，禁止平台板、扩展板件等
           if (state.workflow === 'frame' && def && (def.category !== 'bar' && def.category !== 'connector')) {
-            (window as any).__debugLog?.(`🚫 增加框架阶段仅允许杆件和连接件`);
+            window.__debugLog?.(`🚫 增加框架阶段仅允许杆件和连接件`);
             state.setDraggingPart(null);
             return;
           }
@@ -2636,7 +2675,7 @@ export default function Scene3D() {
               pos = snapped.position;
               rot = snapped.rotation;
               snapHit = true;
-              (window as any).__debugLog?.(`🧲 放置吸附: ${snap.selfCp.cpId} → ${snap.otherCp.cpId}`);
+              window.__debugLog?.(`🧲 放置吸附: ${snap.selfCp.cpId} → ${snap.otherCp.cpId}`);
             }
           } else if (def && def.category === 'platform') {
             // 平台板放置吸附
@@ -2656,12 +2695,12 @@ export default function Scene3D() {
           }
 
           state.addPart(state.draggingPart.partId, pos, rot, state.draggingPart.colorId, false, snapHit);
-          (window as any).__debugLog?.(`✅ 已放置元件: ${state.draggingPart.partId} @ (${pos[0].toFixed(1)}, ${pos[1].toFixed(1)}, ${pos[2].toFixed(1)})`);
+          window.__debugLog?.(`✅ 已放置元件: ${state.draggingPart.partId} @ (${pos[0].toFixed(1)}, ${pos[1].toFixed(1)}, ${pos[2].toFixed(1)})`);
           state.setDraggingPart(null);
           return;
         }
       } else if (state.draggingPart) {
-        (window as any).__debugLog?.('⚠️ 点击未命中地面，无法放置元件');
+        window.__debugLog?.('⚠️ 点击未命中地面，无法放置元件');
       }
 
       // 空白处按下：开始框选（记录起点；拖拽后松开时判定，单点则为取消选中）
@@ -2746,7 +2785,7 @@ export default function Scene3D() {
       // 生长模式：光标附近存在可落平台的矩形框架时，更新平台板幽灵（仅“增加配件”阶段）
       if (state.gizmoMode === 'growth' && !dragState.current.isDown && state.workflow === 'accessory') {
         const am: THREE.Mesh[] = [];
-        ref.partsGroup.children.forEach((g: THREE.Group) => g.children.forEach((c: THREE.Object3D) => { if (c instanceof THREE.Mesh) am.push(c); }));
+        ref.partsGroup.children.forEach((g) => g.children.forEach((c: THREE.Object3D) => { if (c instanceof THREE.Mesh) am.push(c); }));
         const mh = raycaster.intersectObjects(am);
         if (mh.length) {
           updatePlatformGhost(mh[0].point);
@@ -2768,15 +2807,15 @@ export default function Scene3D() {
         if (obj.userData.isAxis) {
           container.style.cursor = 'pointer';
           hovered = true;
-          (window as any).__debugLog?.(`✨ 悬停: 轴 ${obj.userData.axisDir?.toArray().map((v:number)=>v>0.5?'X':v<-0.5?'-X':'')?.join('')||'?'}轴`);
+          window.__debugLog?.(`✨ 悬停: 轴 ${obj.userData.axisDir?.toArray().map((v:number)=>v>0.5?'X':v<-0.5?'-X':'')?.join('')||'?'}轴`);
         } else if (obj.userData.isPlane) {
           container.style.cursor = 'move';
           hovered = true;
-          (window as any).__debugLog?.(`✨ 悬停: 平面`);
+          window.__debugLog?.(`✨ 悬停: 平面`);
         } else if (obj.userData.isArc) {
           container.style.cursor = 'grab';
           hovered = true;
-          (window as any).__debugLog?.(`✨ 悬停: 弧线`);
+          window.__debugLog?.(`✨ 悬停: 弧线`);
         }
       }
       if (!hovered && !ds.isDown && !ds.isDragging) {
@@ -2815,7 +2854,7 @@ export default function Scene3D() {
           }
           const part = state.parts.find((pt: PlacedPart) => pt.id === ds.dragPartId);
           if (part) {
-            (window as any).__debugLog?.(`🔄 拖拽中: id=${ds.dragPartId} axisDir=${ds.axisDir?.toArray()?.map((v:number)=>v>0.5?'1':v<-0.5?'-1':'0')||'null'}`);
+            window.__debugLog?.(`🔄 拖拽中: id=${ds.dragPartId} axisDir=${ds.axisDir?.toArray()?.map((v:number)=>v>0.5?'1':v<-0.5?'-1':'0')||'null'}`);
             let newPos: [number, number, number] = [0, 0, 0];
             const partPos = new THREE.Vector3(part.position[0], part.position[1], part.position[2]);
             let gotPos = false;
@@ -2877,7 +2916,7 @@ export default function Scene3D() {
                         }
                       }
                     }
-                    (window as any).__debugLog?.(`🔄 旋转拖拽: snapAngle=${(snapAngle * 180 / Math.PI).toFixed(0)}° ${isGroup ? `(组 ${memberIds.length})` : ''}`);
+                    window.__debugLog?.(`🔄 旋转拖拽: snapAngle=${(snapAngle * 180 / Math.PI).toFixed(0)}° ${isGroup ? `(组 ${memberIds.length})` : ''}`);
                   }
                 }
                 // 旋转不更新位置，防止 newPos=[0,0,0] 将物体拉回原点
@@ -2900,9 +2939,9 @@ export default function Scene3D() {
                   );
                   newPos = [finalPos.x, Math.max(finalPos.y, 0), finalPos.z];
                   gotPos = true;
-                  (window as any).__debugLog?.(`↕️ 轴拖拽: axisDir=${ds.axisDir.toArray().map((v:number)=>v>0.5?'1':v<-0.5?'-1':'0')} deltaT=${deltaT.toFixed(1)} newPos=${newPos.map((v:number)=>v.toFixed(1))}`);
+                  window.__debugLog?.(`↕️ 轴拖拽: axisDir=${ds.axisDir.toArray().map((v:number)=>v>0.5?'1':v<-0.5?'-1':'0')} deltaT=${deltaT.toFixed(1)} newPos=${newPos.map((v:number)=>v.toFixed(1))}`);
                 } else {
-                  (window as any).__debugLog?.(`⚠️ 轴拖拽: 无交点`);
+                  window.__debugLog?.(`⚠️ 轴拖拽: 无交点`);
                 }
               }
             } else if (ds.planeNormal) {
@@ -2913,9 +2952,9 @@ export default function Scene3D() {
               if (result) {
                 newPos = [proj.x, Math.max(proj.y, 0), proj.z];
                 gotPos = true;
-                (window as any).__debugLog?.(`↕️ 平面拖拽: normal=${ds.planeNormal.toArray().map((v:number)=>v>0.5?'1':v<-0.5?'-1':'0')} newPos=${newPos.map((v:number)=>v.toFixed(1))}`);
+                window.__debugLog?.(`↕️ 平面拖拽: normal=${ds.planeNormal.toArray().map((v:number)=>v>0.5?'1':v<-0.5?'-1':'0')} newPos=${newPos.map((v:number)=>v.toFixed(1))}`);
               } else {
-                (window as any).__debugLog?.(`⚠️ 平面拖拽: 无交点`);
+                window.__debugLog?.(`⚠️ 平面拖拽: 无交点`);
               }
             } else {
               // 自由拖拽（基于地面）
@@ -2987,7 +3026,7 @@ export default function Scene3D() {
                 }));
                 st.batchUpdate(finalUpdates);
                 ds.snapped = false;
-                (window as any).__debugLog?.(`👥 成组移动(刚体): ${memberIds.length} 个成员`);
+                window.__debugLog?.(`👥 成组移动(刚体): ${memberIds.length} 个成员`);
               } else {
                 const def = getPartById(part.partId);
                 // Alt 复制幽灵：自由移动（无碰撞），跟随鼠标；重合时红色半透明高亮
@@ -3006,7 +3045,7 @@ export default function Scene3D() {
                     state.updatePartPosition(ds.dragPartId, snapped.position, true);
                     state.updatePartRotation(ds.dragPartId, snapped.rotation);
                     ds.snapped = true;
-                    (window as any).__debugLog?.(`🧲 自动吸附: ${snap.selfCp.cpId} → ${snap.otherCp.cpId} d=${snap.dist.toFixed(1)}`);
+                    window.__debugLog?.(`🧲 自动吸附: ${snap.selfCp.cpId} → ${snap.otherCp.cpId} d=${snap.dist.toFixed(1)}`);
                   } else {
                     state.updatePartPosition(ds.dragPartId, newPos, false);
                     ds.snapped = false;
@@ -3019,7 +3058,7 @@ export default function Scene3D() {
                     state.updatePartPosition(ds.dragPartId, snap.position, true);
                     state.updatePartRotation(ds.dragPartId, snap.rotation);
                     ds.snapped = true;
-                    (window as any).__debugLog?.(`🧲 平台板吸附框架`);
+                    window.__debugLog?.(`🧲 平台板吸附框架`);
                   } else {
                     state.updatePartPosition(ds.dragPartId, newPos, false);
                     ds.snapped = false;
@@ -3029,10 +3068,10 @@ export default function Scene3D() {
                   ds.snapped = false;
                 }
               }
-              (window as any).__debugLog?.(`✅ 更新位置: ${newPos.map((v:number)=>v.toFixed(1))}`);
+              window.__debugLog?.(`✅ 更新位置: ${newPos.map((v:number)=>v.toFixed(1))}`);
             }
           } else {
-            (window as any).__debugLog?.(`❌ 未找到部件: id=${ds.dragPartId}`);
+            window.__debugLog?.(`❌ 未找到部件: id=${ds.dragPartId}`);
           }
         }
       }
@@ -3047,7 +3086,7 @@ export default function Scene3D() {
       }
     };
 
-    const onPointerUp = (_e: PointerEvent) => {
+    const onPointerUp = () => {
       // 视角导航模式：结束时恢复悬停光标，场景逻辑不参与（未进入场景拖拽）
       const vm = useStore.getState().navMode;
       if (vm !== 'none') {
@@ -3064,14 +3103,12 @@ export default function Scene3D() {
         // 判断框选方向：左上→右下（正向）要求完全包含，反之要求部分相交
         const fwd = x2 >= x1 && y2 >= y1;
         const selIds: string[] = [];
-        const pts = state.parts;
         const curParts = state.parts;
         for (const p of curParts) {
           const def = getPartById(p.partId);
           if (!def) continue;
           const aabb = partWorldAABB(p);
           const sc = worldToScreen(aabb.minX, aabb.minY, aabb.minZ, aabb.maxX, aabb.maxY, aabb.maxZ);
-          const margin = 0;
           if (fwd) {
             // 完全在框内：物体屏幕AABB ⊆ 框
             const fullyInside =
@@ -3166,7 +3203,7 @@ export default function Scene3D() {
       pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(pointer, camera);
       const allMeshes: THREE.Mesh[] = [];
-      ref.partsGroup.children.forEach((g: THREE.Group) => {
+      ref.partsGroup.children.forEach((g) => {
         g.children.forEach((c) => { if (c instanceof THREE.Mesh) allMeshes.push(c); });
       });
       const hits = raycaster.intersectObjects(allMeshes);
@@ -3191,7 +3228,7 @@ export default function Scene3D() {
         }
       }
       if (menuIds.length === 0) return;
-      (window as any).__sceneCtxMenu?.({ x: e.clientX, y: e.clientY, ids: [...menuIds] });
+      window.__sceneCtxMenu?.({ x: e.clientX, y: e.clientY, ids: [...menuIds] });
     };
     container.addEventListener('contextmenu', onContextMenu);
 
@@ -3206,7 +3243,7 @@ export default function Scene3D() {
         platGhostGroupRef.current = null;
       }
     };
-  }, []);
+  }, [clearPlatformGhost, updatePlatformGhost]);
 
   // 键盘快捷键
   useEffect(() => {
@@ -3232,7 +3269,8 @@ export default function Scene3D() {
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
         e.preventDefault();
-        e.shiftKey ? state.redo() : state.undo();
+        if (e.shiftKey) state.redo();
+        else state.undo();
       }
       // G 快捷键：成组/解组
       if ((e.key === 'g' || e.key === 'G') && !e.metaKey && !e.ctrlKey && !e.altKey) {

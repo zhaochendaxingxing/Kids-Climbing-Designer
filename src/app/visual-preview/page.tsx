@@ -1,5 +1,7 @@
 'use client';
 
+import Image from 'next/image';
+
 import { useCallback, useState } from 'react';
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
@@ -396,7 +398,7 @@ export default function VisualPreview() {
                     >
                       <div className={styles['part-image']}>
                         {thumbnails[part.id] ? (
-                          <img
+                          <Image unoptimized
                             src={thumbnails[part.id]}
                             width={144}
                             height={88}

@@ -304,6 +304,10 @@ export class TransformGizmo {
 
   // ========= 交互 =========
 
+  get handleCount(): number {
+    return this.handleMap.size;
+  }
+
   intersect(raycaster: THREE.Raycaster): GizmoHitInfo | null {
     if (!this.group.visible) return null;
 
@@ -357,7 +361,7 @@ export class TransformGizmo {
     const info: HandleInfo = { type: hit.type, axis: hit.axis, plane: hit.plane };
 
     let dragAxis = new THREE.Vector3();
-    let dragPlane = new THREE.Plane();
+    const dragPlane = new THREE.Plane();
     let startAxisParam = 0;
 
     if (hit.type === 'axis' && hit.axis) {

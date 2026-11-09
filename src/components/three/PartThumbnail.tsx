@@ -1,5 +1,7 @@
 'use client';
 
+import Image from 'next/image';
+
 import { useEffect, useRef, useState } from 'react';
 import { Box } from 'lucide-react';
 import * as THREE from 'three';
@@ -130,7 +132,7 @@ export default function PartThumbnail({
   return (
     <div ref={host} className="designer-part-image">
       {image ? (
-        <img src={image} width={144} height={92} alt="" />
+        <Image unoptimized src={image} width={144} height={92} alt="" />
       ) : (
         <Box size={27} aria-hidden="true" />
       )}

@@ -29,7 +29,8 @@ export default function GizmoTestPage() {
   const [debugLog, setDebugLog] = useState<string[]>(['等待操作...']);
 
   useEffect(() => {
-    if (!containerRef.current) return;
+    const container = containerRef.current;
+    if (!container) return;
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0xf5f5fa);
@@ -37,7 +38,7 @@ export default function GizmoTestPage() {
 
     const camera = new THREE.PerspectiveCamera(
       50,
-      containerRef.current.clientWidth / containerRef.current.clientHeight,
+      container.clientWidth / container.clientHeight,
       0.1,
       1000,
     );
@@ -45,9 +46,9 @@ export default function GizmoTestPage() {
     cameraRef.current = camera;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setSize(containerRef.current.clientWidth, containerRef.current.clientHeight);
+    renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.setPixelRatio(window.devicePixelRatio);
-    containerRef.current.appendChild(renderer.domElement);
+    container.appendChild(renderer.domElement);
     rendererRef.current = renderer;
 
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -112,8 +113,8 @@ export default function GizmoTestPage() {
     }
 
     function updateMouse(e: MouseEvent) {
-      if (!containerRef.current) return;
-      const rect = containerRef.current.getBoundingClientRect();
+      if (!container) return;
+      const rect = container.getBoundingClientRect();
       mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
       mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(mouse, camera);
@@ -292,7 +293,7 @@ export default function GizmoTestPage() {
               'pos=' + g.group.position.toArray().map(v => v.toFixed(1)).join(','),
               'hit=' + (hit ? hit.type + ':' + (hit.axis || hit.plane || '') : '无'),
               '递归命中数=' + allHits.length,
-              'handleMap=' + (g as any).handleMap?.size,
+              'handleMap=' + g.handleCount,
             );
           } else {
             console.log('[gizmo-debug] 帧#' + hoverDebugCounter.current, 'gizmo不可见或不存在');
@@ -425,10 +426,10 @@ export default function GizmoTestPage() {
 
     // 窗口大小
     const handleResize = () => {
-      if (!containerRef.current) return;
-      camera.aspect = containerRef.current.clientWidth / containerRef.current.clientHeight;
+      if (!container) return;
+      camera.aspect = container.clientWidth / container.clientHeight;
       camera.updateProjectionMatrix();
-      renderer.setSize(containerRef.current.clientWidth, containerRef.current.clientHeight);
+      renderer.setSize(container.clientWidth, container.clientHeight);
     };
     window.addEventListener('resize', handleResize);
 
@@ -463,7 +464,7 @@ export default function GizmoTestPage() {
       if (frameId % 120 === 0) {
         const g = gizmoRef.current;
         if (g) {
-          console.log('[gizmo-test] 状态:', 'visible=' + g.group.visible, 'pos=' + g.group.position.toArray().map(v => v.toFixed(1)).join(','), 'handleMap=' + (g as any).handleMap?.size);
+          console.log('[gizmo-test] 状态:', 'visible=' + g.group.visible, 'pos=' + g.group.position.toArray().map(v => v.toFixed(1)).join(','), 'handleMap=' + g.handleCount);
         }
       }
     };
@@ -480,8 +481,8 @@ export default function GizmoTestPage() {
       controls.dispose();
       gizmo.dispose();
       renderer.dispose();
-      if (containerRef.current && renderer.domElement.parentNode === containerRef.current) {
-        containerRef.current.removeChild(renderer.domElement);
+      if (container && renderer.domElement.parentNode === container) {
+        container.removeChild(renderer.domElement);
       }
     };
   }, []);
