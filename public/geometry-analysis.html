@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>按用户思路推算 45°L 嵌套件尺寸</title>
+<style>
+  :root{--red:#EE5A5A;--green:#26C281;--blue:#4A90D9;--orange:#FF9F43;--grey:#666;--bb:#e5e9f0;--ink:#222}
+  *{box-sizing:border-box}
+  body{font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;background:#f4f6fb;color:var(--ink);margin:0;padding:26px}
+  h1{font-size:21px;margin:0 0 4px}
+  .sub{color:var(--grey);font-size:13px;margin-bottom:18px}
+  .card{background:#fff;border:1px solid var(--bb);border-radius:14px;padding:20px;margin-bottom:20px;box-shadow:0 3px 14px rgba(20,40,90,.06)}
+  .card h2{font-size:15px;margin:0 0 12px;display:flex;align-items:center;gap:8px}
+  table{border-collapse:collapse;width:100%;font-size:13px}
+  th,td{border:1px solid var(--bb);padding:6px 9px;text-align:left}
+  th{background:#f6f8fc;font-weight:600}
+  .tag{display:inline-block;padding:1px 8px;border-radius:20px;font-size:11px;font-weight:700}
+  .red{background:#fdeaea;color:var(--red)}
+  .grn{background:#e3f6ee;color:var(--green)}
+  .blu{background:#e8f1fb;color:var(--blue)}
+  .org{background:#fff0db;color:var(--orange)}
+  .hl{border-left:4px solid var(--orange);background:#fff8ee;padding:12px 14px;border-radius:8px;margin-top:12px;font-size:13.5px;line-height:1.9}
+  svg{max-width:100%;height:auto;border:1px solid var(--bb);border-radius:10px;background:#fff}
+  .leg{font-size:11.5px;color:var(--grey);margin-top:8px;line-height:1.7}
+  .flow{font-size:14px;line-height:2.1;background:#fbfcff;border:1px dashed var(--blue);border-radius:10px;padding:12px 16px;margin-top:10px}
+</style>
+</head>
+<body>
+
+<h1>🔩 按您的思路推算「45°L 嵌套件」目标尺寸</h1>
+<div class="sub">推导骨架 = 底部框架 40 + 立杆轴心 ±20 + 斜杆 45° 交汇顶部 · 单位 cm</div>
+
+<div class="card">
+  <h2><span class="tag blu">① 推导链条</span>（对称，看右半 → 乘 2）</h2>
+  <div class="flow">
+    <b>1.</b> 底部 35 杆 + 两端各 L 件 → 立杆轴心距 = 2·(17.5+2.5) = <b>40</b>，半宽 <b>20</b>。<br/>
+    <b>2.</b> 斜杆 bar-35，45° 水平投影 = 35·cos45° ≈ <b>24.75</b>。<br/>
+    <b>3.</b> 投影 24.75 &gt; 半宽 20，超出 <b>Δ = 24.75 − 20 = 4.75 &#8776; 4.7</b>。<br/>
+    <b>4.</b> 按您的关系「半宽 = 斜杆投影 − 立杆偏移」：要让立杆回落到 x=20，嵌套件必须把立杆端<b>向内收敛 X = 4.7cm</b>（您作图已确认）。<br/>
+    <b>5.</b> 嵌套件目标横向尺寸 = 嵌套深度 X(4.7) ＋ 单个球转接直径 5 = <b>9.7 cm</b>。
+  </div>
+  <div class="hl"><b>✅ 您的结论成立：</b>嵌套深度 <b>X = 4.7</b>（舍入后，精确 Δ=4.75）。这是让 35cm 斜杆 45° 竖向投影后立杆正好落回框架角(半宽20)所需的唯一内收量。</div>
+</div>
+
+<div class="card">
+  <h2><span class="tag org">② 完整装配正视剖面</span>（右半 + 底框 + 嵌套件）</h2>
+  <!-- 坐标：S=6.5px/cm, pxX=120+cmX*6.5, pxY=330-cmY*6.5 -->
+  <svg viewBox="0 0 640 400" xmlns="http://www.w3.org/2000/svg" font-family="'PingFang SC',sans-serif" font-size="11">
+    <rect width="640" height="400" fill="#fff"/>
+    <!-- 地面 -->
+    <line x1="40" y1="330" x2="620" y2="330" stroke="#ddd"/>
+    <!-- 底部水平杆 35：中央 x=0(120px) 到 右端 x=17.5(233px) -->
+    <rect x="120" y="322" width="113" height="5" fill="#d9ead3" stroke="#26C281"/>
+    <text x="176" y="316" text-anchor="middle" fill="#666">底杆 35</text>
+    <!-- 底部右 L 件：球心 x=20(250px) -->
+    <circle cx="250" cy="330" r="16" fill="#333"/>
+    <text x="250" y="356" text-anchor="middle" fill="#555">底部L件</text>
+    <!-- 立杆：从底部L件(向上竖直接口) 竖直向上 到嵌套件 -->
+    <rect x="246" y="100" width="8" height="230" fill="#efe6cf" stroke="#c0a96a"/>
+    <text x="290" y="180" fill="#8a7430" transform="rotate(90 290 180)">立杆（竖直，轴心 x=20）</text>
+    <!-- 嵌套件 COMBO：45°件 + L件 双球，位于立杆顶端 -->
+    <circle cx="250" cy="96" r="16" fill="#e8f1fb" stroke="#4A90D9" stroke-width="2"/>
+    <text x="250" y="99" text-anchor="middle" fill="#4A90D9" font-size="10">45°件</text>
+    <circle cx="282" cy="92" r="16" fill="#e3f6ee" stroke="#26C281" stroke-width="2"/>
+    <text x="282" y="95" text-anchor="middle" fill="#26C281" font-size="10">L件</text>
+    <!-- 斜杆 45° 从顶部转接到 嵌套件 45°件 up45 -->
+    <line x1="120" y1="20" x2="258" y2="140" stroke="#c9a227" stroke-width="4"/>
+    <text x="130" y="50" fill="#a37807" font-weight="700" transform="rotate(-45 150 60)">斜杆 bar-35（45°）</text>
+    <!-- 顶部L件（对称轴） -->
+    <circle cx="120" cy="16" r="16" fill="#333"/>
+    <text x="120" y="6" text-anchor="middle" fill="#555" font-size="10">顶部L件(对称轴)</text>
+    <!-- up45 端 --><circle cx="258" cy="140" r="5" fill="#FF9F43"/>
+    <text x="266" y="150" fill="#FF9F43">up45端(内置)</text>
+    <!-- 立杆端 --><circle cx="246" cy="110" r="5" fill="#26C281"/>
+    <text x="180" y="104" fill="#26C281">立杆端</text>
+    <!-- 水平投影标注 -->
+    <line x1="120" y1="330" x2="250" y2="330" stroke="#EE5A5A" stroke-width="1.4" stroke-dasharray="5,4"/>
+    <text x="150" y="344" fill="#EE5A5A">框架半宽 20</text>
+    <line x1="250" y1="330" x2="288" y2="330" stroke="#FF9F43" stroke-width="1.4" stroke-dasharray="5,4"/>
+    <text x="286" y="344" fill="#FF9F43">实投 24.75</text>
+    <!-- 嵌套件内收 -->
+    <path d="M 258 140 L 320 140" stroke="#FF9F43" stroke-width="1.5" stroke-dasharray="4,3"/>
+    <rect x="310" y="120" width="0" height="0"/>
+  </svg>
+  <div class="leg">
+    上图按<b>目标装配</b>绘制：立杆轴心落回 x=20（框架角），斜杆 45°。斜杆投影 24.75 超出半宽 20 的部分（4.75）由嵌套件在立杆顶端「内收」吸收，使立杆正好立在框架角上。
+  </div>
+</div>
+
+<div class="card">
+  <h2><span class="tag blu">③ 目标嵌套件尺寸 vs 真实 COMBO</span></h2>
+  <table>
+    <tr><th>对比项</th><th>目标（您确认 X=4.7）</th><th>真实 COMBO（K=1.0）</th></tr>
+    <tr><td>立杆相对斜杆端偏移（嵌套深度）</td><td class="grn"><b>内收 X = 4.7</b></td><td class="red">外扩 +2.23</td></tr>
+    <tr><td>组合横向尺寸</td><td class="grn"><b>X + 5 = 9.7</b></td><td class="red">两球心距 4.0</td></tr>
+    <tr><td>方向</td><td class="grn">内收（收窄屋顶）</td><td class="red">外扩（撑宽屋顶）</td></tr>
+    <tr><td>立杆落位 x</td><td class="grn">20 ✓ 正好在框架角</td><td class="red">≈28.75（超 8.75）</td></tr>
+  </table>
+  <div class="hl">
+    <b>结论：</b>要「三角形结构与方形框架由 45°L 件完美接合」，嵌套件必须是独立的<b>内收型</b>构件：立杆接口相对斜杆接口向内侧偏移 <b>X = 4.7cm</b>（精确 Δ=4.75），整体横向尺寸 <b>9.7cm</b>（含 5cm 球转接段）。<br/><br/>
+    现有 COMBO（两独立球嵌套）物理上<b>无法</b>做到内收 4.7——嵌套深度 K 上限仅 ~1.6（两球心距 5−K 不能小于球半径之和），且方向本身就是外扩。因此需要一台<b>一体式专用件</b>，或改斜杆长度/角度。
+  </div>
+</div>
+
+<div class="card">
+  <h2><span class="tag grn">④ 其它路径对照</span></h2>
+  <table>
+    <tr><th>路径</th><th>做法</th><th>内收需求</th></tr>
+    <tr><td>A. 换斜杆 ≤21.2</td><td>斜杆≈21.2cm 使投影≈半宽 20</td><td>0（无需嵌套内收）</td></tr>
+    <tr><td>B. 减倾斜角</td><td>斜杆角度 &lt;45°，压缩投影</td><td>0~小</td></tr>
+    <tr><td>C. 加宽框架≈57.5</td><td>底部框架按 35 斜杆实投影重做</td><td>0（框架迁就屋顶）</td></tr>
+    <tr><td class="org">D. 内收嵌套件 9.7</td><td>一体式专用 45°L 转接件（立杆接口内收 4.7）</td><td class="grn">X = 4.7（您确认的方案）</td></tr>
+  </table>
+</div>
+
+</body>
+</html>
