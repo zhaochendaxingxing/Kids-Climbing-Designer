@@ -566,7 +566,7 @@ function buildExtensionMesh(
   group.add(mesh);
 }
 
-function createPartMesh(part: PlacedPart, def: PartDefinition, color: string, opacity = 1, outlineColor?: string): THREE.Group {
+export function createPartMesh(part: PlacedPart, def: PartDefinition, color: string, opacity = 1, outlineColor?: string): THREE.Group {
   const group = new THREE.Group();
   // 兼容旧方案数据中缺失 position/rotation 的情况
   const pos = part.position || [0, 0, 0];
@@ -1705,15 +1705,17 @@ export default function Scene3D() {
     if (!container) return;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0xE8F4FD);
+    scene.background = new THREE.Color(0xF0F4F6);
 
-    const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 1, 2000);
+    const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 1, 5000);
     camera.position.set(150, 120, 150);
     camera.lookAt(0, 0, 0);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(container.clientWidth, container.clientHeight);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.1;
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     container.appendChild(renderer.domElement);
@@ -1724,28 +1726,34 @@ export default function Scene3D() {
     controls.dampingFactor = 0.1;
     controls.maxPolarAngle = Math.PI / 2.1;
     controls.minDistance = 30;
-    controls.maxDistance = 500;
+    controls.maxDistance = 2500;
     // 左键留给场景交互（选中/拖拽/放置），右键负责视角转动，中键缩放
     (controls.mouseButtons as any).LEFT = -1;
     (controls.mouseButtons as any).MIDDLE = THREE.MOUSE.ROTATE;
     (controls.mouseButtons as any).RIGHT = -1;
 
     // 灯光
-    const ambient = new THREE.AmbientLight(0xffffff, 0.5);
+    const ambient = new THREE.AmbientLight(0xffffff, 0.85);
     scene.add(ambient);
-    const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+    const dirLight = new THREE.DirectionalLight(0xfff8ed, 1.8);
     dirLight.position.set(100, 150, 100);
     dirLight.castShadow = true;
     dirLight.shadow.mapSize.width = 1024;
     dirLight.shadow.mapSize.height = 1024;
+    dirLight.shadow.camera.left = -180;
+    dirLight.shadow.camera.right = 180;
+    dirLight.shadow.camera.top = 180;
+    dirLight.shadow.camera.bottom = -180;
+    dirLight.shadow.bias = -0.0004;
+    dirLight.shadow.normalBias = 0.4;
     scene.add(dirLight);
-    const hemiLight = new THREE.HemisphereLight(0x87CEEB, 0x90EE90, 0.4);
+    const hemiLight = new THREE.HemisphereLight(0xffffff, 0xbdc6cd, 0.85);
     scene.add(hemiLight);
 
     // 地面
     const groundGeo = new THREE.PlaneGeometry(400, 400);
     const groundMat = new THREE.MeshStandardMaterial({
-      color: 0xE8F4FD,
+      color: 0xF0F4F6,
       transparent: true,
       opacity: 0.3,
       side: THREE.DoubleSide,
@@ -1757,7 +1765,10 @@ export default function Scene3D() {
     scene.add(ground);
 
     // 网格
-    const gridHelper = new THREE.GridHelper(400, 40, 0x4A90D9, 0x4A90D9);
+    const gridHelper = new THREE.GridHelper(400, 40, 0xcbd5df, 0xdce3e8);
+    const gridMaterial = gridHelper.material as THREE.LineBasicMaterial;
+    gridMaterial.transparent = true;
+    gridMaterial.opacity = 0.5;
     gridHelper.position.y = 0.1;
     scene.add(gridHelper);
 
@@ -1840,16 +1851,29 @@ export default function Scene3D() {
     const onResize = () => {
       const w = container.clientWidth;
       const h = container.clientHeight;
+      if (w === 0 || h === 0) return;
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
       renderer.setSize(w, h);
     };
     window.addEventListener('resize', onResize);
+    const resizeObserver = new ResizeObserver(onResize);
+    resizeObserver.observe(container);
 
     // —— 顶部菜单触发的视角操作事件：重置 / 平移 / 旋转 ——
     const onCameraReset = () => {
-      camera.position.set(150, 120, 150);
-      controls.target.set(0, 0, 0);
+      const bounds = new THREE.Box3().setFromObject(partsGroup);
+      if (bounds.isEmpty()) {
+        camera.position.set(150, 120, 150);
+        controls.target.set(0, 0, 0);
+      } else {
+        const sphere = bounds.getBoundingSphere(new THREE.Sphere());
+        const verticalAngle = THREE.MathUtils.degToRad(camera.fov);
+        const horizontalAngle = 2 * Math.atan(Math.tan(verticalAngle / 2) * camera.aspect);
+        const distance = Math.max(40, sphere.radius / Math.sin(Math.min(verticalAngle, horizontalAngle) / 2) * 1.08);
+        controls.target.copy(sphere.center);
+        camera.position.copy(sphere.center).add(new THREE.Vector3(1, 0.7, 1).normalize().multiplyScalar(distance));
+      }
       controls.update();
     };
     const onCameraPan = () => {
@@ -1881,6 +1905,7 @@ export default function Scene3D() {
     return () => {
       cancelAnimationFrame(rafId);
       window.removeEventListener('resize', onResize);
+      resizeObserver.disconnect();
       window.removeEventListener('gizmo-reset-camera', onCameraReset);
       window.removeEventListener('gizmo-pan-camera', onCameraPan);
       window.removeEventListener('gizmo-rotate-camera', onCameraRotate);
@@ -1909,7 +1934,7 @@ export default function Scene3D() {
       const def = getPartById(part.partId);
       if (!def) return;
       const colorList = def.category === 'connector' ? CONNECTOR_COLORS : PART_COLORS;
-      const color = colorList.find((c: { id: string }) => c.id === part.colorId)?.hex || '#CCCCCC';
+      const color = colorList.find((c: { id: string }) => c.id === (part.colorId || def.defaultColor))?.hex || '#CCCCCC';
       // 多选高亮描边：选中=天空蓝，悬停=浅蓝
       const isSel = selectedIds.includes(part.id);
       const isHover = part.id === hoveredId;

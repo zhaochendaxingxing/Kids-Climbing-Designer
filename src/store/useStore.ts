@@ -992,11 +992,12 @@ export const useStore = create<StoreState>((set, get) => ({
     set({ parts: [], groups: [], selectedIds: [], selectedPartId: null });
     const next: PlacedPart[] = [];
     const add = (partId: string, position: [number, number, number], rotation?: [number, number, number], colorId?: string) => {
-      next.push({ id: uuidv4(), partId, position, rotation: rotation || [0, 0, 0], colorId: colorId || undefined as any });
+      const defaultColor = getPartById(partId)?.category === 'connector' ? 'black' : 'olive';
+      next.push({ id: uuidv4(), partId, position, rotation: rotation || [0, 0, 0], colorId: colorId || defaultColor });
     };
     // 格子边长：35cm 杆 + 连接件贴合（CONN_POINT_DIST*2 = 5cm）≈ 40cm
     const cell = 40;
-    // 用立六通连接件作为框架节点（可适应各向接口）；杆件用默认色(mint)，连接件黑色
+    // 用立六通连接件作为框架节点，杆件橄榄绿、连接件黑色。
     for (let z = 0; z <= depth; z++) {
       for (let x = 0; x <= cols; x++) {
         for (let y = 0; y <= layers; y++) {

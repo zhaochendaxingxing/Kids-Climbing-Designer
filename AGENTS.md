@@ -29,8 +29,8 @@ src/
 │   ├── gizmo/
 │   │   └── TransformGizmo.ts # 操作轴组件（纯 Three.js 类，独立封装）
 │   └── ui/
-│       ├── RightPanel.tsx    # 右侧功能菜单面板（窄竖条 icon 轨道 + 展开面板：配件库[基本配件/基本模块]/存储方案/统计信息/对比）⚠️ 当前唯一被 page.tsx 渲染的右侧面板
-│       ├── WorkflowTab.tsx    # 模型左上角快捷工作选项卡（生成框架/增加框架/增加配件 三段式建模流程）⚠️ page.tsx 在 Scene3D 上叠加渲染
+│       ├── RightPanel.tsx    # 右侧功能菜单面板（顶部五项导航 + 可收起面板：配件库/基本模块/扩展配件/存储方案/统计信息/对比）⚠️ 当前唯一被 page.tsx 渲染的右侧面板
+│       ├── WorkflowTab.tsx    # 工作模式栏与框架参数面板，section=modes 在顶部工具栏、section=parameters 在场景左上方
 │       ├── PartsLibrary.tsx  # 遗留的配件素材库（内容已并入 RightPanel 的 BasicPartsGrid，当前未被引用）
 │       ├── Toolbar.tsx       # 遗留顶部工具栏（未使用，工具栏逻辑已内联在 page.tsx）
 │       └── StatusBar.tsx     # 底部状态栏
@@ -47,7 +47,7 @@ src/
 ## 核心功能
 
 ### 0. 整体布局（`page.tsx`）
-- 顶部菜单区（通栏）：品牌「攀爬架DIY设计器」+ 副标题；撤销/重做 + **视角导航模式（移动视角/旋转视角，store `navMode`，点击进入后鼠标变图标、左键拖拽平移/旋转视角，再点退出）** + 居中视角；油漆桶（选色→点击杆件/平台板染色，store `paintColor`）+ 全选同类（弹出分类菜单选杆件/连接件/平台板→整类全选，随后统一/随机着色、统一调成六向或自动精简空闲连接端）+ 吸附 ON/OFF；已选中 N 件 + 导出(JSON)。**注意：移动/生长模式（store `gizmoMode`）已不在顶部，集成进左上角 WorkflowTab 四按钮。**
+- 顶部菜单区（通栏）：品牌「攀爬架DIY设计器」+ 副标题；撤销/重做 + **视角导航模式（移动视角/旋转视角，store `navMode`，点击进入后鼠标变图标、左键拖拽平移/旋转视角，再点退出）** + 居中视角；油漆桶（选色→点击杆件/平台板染色，store `paintColor`）+ 全选同类（弹出分类菜单选杆件/连接件/平台板→整类全选，随后统一/随机着色、统一调成六向或自动精简空闲连接端）+ 吸附 ON/OFF；已选中 N 件 + 导出(JSON)。**注意：移动/生长模式（store `gizmoMode`）已不在顶部，集成进顶部 WorkflowTab 四按钮。**
 - 主体：左侧 `flex-1` = `Scene3D` 工作区；右侧 = `RightPanel` 功能菜单面板。
 - 配色遵循 `DESIGN.md`（天空蓝 #4A90D9 主色、阳光橙 #FF9F43 强调、圆角胶囊、柔和阴影）。
 

@@ -1,5 +1,7 @@
 import { useState, useMemo } from 'react';
-import { Button, List, Modal, Input, message, Popconfirm, Tag, Empty, Tooltip } from 'antd';
+import { Search, Check } from 'lucide-react';
+import PartThumbnail from '@/components/three/PartThumbnail';
+import { Button, Modal, Input, message, Popconfirm, Tag, Empty, Tooltip } from 'antd';
 import {
   SaveOutlined,
   FolderOpenOutlined,
@@ -14,7 +16,6 @@ import {
   LayoutOutlined,
   DragOutlined,
   DoubleRightOutlined,
-  RightOutlined,
   LeftOutlined,
   ArrowUpOutlined,
   ArrowDownOutlined,
@@ -22,8 +23,8 @@ import {
   StarOutlined,
 } from '@ant-design/icons';
 import { useStore } from '@/store/useStore';
-import type { PartCategory, DesignProject, PresetUnit, PartDefinition } from '@/types/parts';
-import { CATEGORY_CONFIG, PARTS_LIBRARY, PART_COLORS, CONNECTOR_COLORS, PRESET_UNITS, COMBO_45L, EXT_BARS, EXT_PLATES } from '@/data/parts';
+import type { PartCategory, PresetUnit, PartDefinition } from '@/types/parts';
+import { CATEGORY_CONFIG, PARTS_LIBRARY, PART_COLORS, CONNECTOR_COLORS, PRESET_UNITS, COMBO_45L, EXT_BARS, EXT_PLATES, getPartById } from '@/data/parts';
 
 // ==================== DESIGN.md 色彩令牌 ====================
 const C = {
@@ -37,139 +38,194 @@ const C = {
   errorSoft: '#FDEEEE',
   warn: '#F7CA45',
   warnSoft: '#FEF7DD',
-  bg: '#F6F8FA',
+  bg: '#FFFFFF',
   card: '#FFFFFF',
-  text: '#333333',
-  text2: '#6B7280',
+  text: '#283544',
+  text2: '#6B7887',
   line: '#EEF1F4',
   railBg: '#FFFFFF',
 };
 
 // ==================== 基本配件网格 ====================
-function PartCard({ part, onPick }: { part: PartDefinition; onPick: (partId: string, colorId: string) => void }) {
+function PartCard({
+  part,
+  onPick,
+}: {
+  part: PartDefinition;
+  onPick: (partId: string, colorId: string) => void;
+}) {
   const [selectedColor, setSelectedColor] = useState(part.defaultColor);
+  const draggingPart = useStore((state) => state.draggingPart);
+  const active = draggingPart?.partId === part.id;
   const colorHex =
-    (part.category === 'connector' ? CONNECTOR_COLORS : PART_COLORS).find((c) => c.id === selectedColor)?.hex || '#ccc';
-
-  const previewStyle: React.CSSProperties = (() => {
-    if (part.category === 'bar') return { width: 52, height: 9, borderRadius: 5, backgroundColor: colorHex };
-    if (part.category === 'connector') return { width: 24, height: 24, borderRadius: '50%', backgroundColor: colorHex };
-    const ratio = part.size.depth / part.size.width;
-    return { width: 52, height: Math.max(16, Math.round(52 * ratio)), borderRadius: 3, backgroundColor: colorHex };
-  })();
-
-  const isConnector = part.category === 'connector';
+    (part.category === 'connector' ? CONNECTOR_COLORS : PART_COLORS).find(
+      (color) => color.id === selectedColor,
+    )?.hex || '#6B7F4A';
+  const dimensions = part.barSpec
+    ? `长度 ${part.barSpec.length} cm`
+    : part.connectorSpec
+      ? '适配 4 cm 圆管'
+      : `${part.size.width} × ${part.size.depth} cm`;
 
   return (
-    <div
-      className="p-2.5 rounded-xl bg-white cursor-pointer border transition-all select-none"
-      style={{ borderColor: 'transparent', boxShadow: '0 2px 8px rgba(0,0,0,0.06)' }}
-      onClick={() => onPick(part.id, selectedColor)}
-      onMouseEnter={(e) => (e.currentTarget.style.borderColor = `${C.primary}66`)}
-      onMouseLeave={(e) => (e.currentTarget.style.borderColor = 'transparent')}
-    >
-      <div className="h-9 rounded-lg mb-1.5 grid place-items-center" style={{ background: 'rgba(74,144,217,0.06)' }}>
-        <div style={{ ...previewStyle, boxShadow: '0 2px 4px rgba(0,0,0,0.12)' }} />
-      </div>
-      <div className="text-[12px] font-medium truncate" style={{ color: C.text }}>
-        {part.name}
-      </div>
-      <div className="text-[10px] mb-1.5" style={{ color: C.text2 }}>
-        {part.size.width}×{part.size.height}×{part.size.depth}cm
-      </div>
-      {!isConnector && (
-        <div className="flex gap-1 flex-wrap">
-          {part.colors.slice(0, 5).map((color) => (
-            <span
+    <article className="designer-part-card" data-active={active}>
+      <button
+        className="designer-part-select"
+        aria-label={`选择${part.name}`}
+        aria-pressed={active}
+        draggable
+        onDragStart={() => onPick(part.id, selectedColor)}
+        onClick={() => onPick(part.id, selectedColor)}
+      >
+        <PartThumbnail part={part} color={colorHex} />
+        {active && (
+          <span className="designer-part-check">
+            <Check size={11} aria-hidden="true" />
+          </span>
+        )}
+        <strong>{part.name}</strong>
+        <span>{dimensions}</span>
+      </button>
+      {part.category !== 'connector' && (
+        <div
+          className="designer-part-colors"
+          role="group"
+          aria-label={`${part.name}配色`}
+        >
+          {part.colors.map((color) => (
+            <button
               key={color.id}
+              type="button"
+              aria-label={`${part.name}：${color.name}`}
+              aria-pressed={selectedColor === color.id}
               title={color.name}
-              className="w-3.5 h-3.5 rounded-full cursor-pointer transition-transform hover:scale-110"
-              style={{
-                backgroundColor: color.hex,
-                border: selectedColor === color.id ? `2px solid ${C.primary}` : '2px solid #fff',
-                boxShadow: selectedColor === color.id ? '0 0 0 1px rgba(74,144,217,0.4)' : '0 0 0 1px rgba(0,0,0,0.06)',
-              }}
-              onClick={(e) => {
-                e.stopPropagation();
+              style={{ '--part-color': color.hex } as React.CSSProperties}
+              onClick={() => {
                 setSelectedColor(color.id);
+                if (active) onPick(part.id, color.id);
               }}
             />
           ))}
         </div>
       )}
-    </div>
+    </article>
   );
 }
 
 function BasicPartsGrid() {
   const setDraggingPart = useStore((state) => state.setDraggingPart);
   const setPendingPreset = useStore((state) => state.setPendingPreset);
+  const [category, setCategory] = useState<PartCategory | 'all'>('all');
+  const [query, setQuery] = useState('');
   const partsByCategory = useMemo(() => {
-    const result: Record<PartCategory, PartDefinition[]> = { bar: [], connector: [], platform: [] };
-    PARTS_LIBRARY.forEach((p) => {
-      // 「45度两通(嵌套端)」仅作为 45°L嵌套组合的一部分使用，不作为独立配件展示/选择
-      if (p.id === 'connector-45deg-nest') return;
-      // 扩展配件只在「扩展配件」选项卡展示，不混入基本配件
-      if (p.extension) return;
-      result[p.category].push(p);
+    const result: Record<PartCategory, PartDefinition[]> = {
+      bar: [],
+      connector: [],
+      platform: [],
+    };
+    PARTS_LIBRARY.forEach((part) => {
+      if (part.id === 'connector-45deg-nest' || part.extension) return;
+      if (part.name.toLowerCase().includes(query.trim().toLowerCase()))
+        result[part.category].push(part);
     });
     return result;
-  }, []);
-
-  const pick = (partId: string, colorId: string) => setDraggingPart({ partId, colorId });
+  }, [query]);
+  const categories =
+    category === 'all'
+      ? (Object.keys(CATEGORY_CONFIG) as PartCategory[])
+      : [category];
+  const comboVisible =
+    categories.includes('connector') && COMBO_45L.name.includes(query.trim());
+  const pick = (partId: string, colorId: string) =>
+    setDraggingPart({ partId, colorId });
   const armCombo = () => {
-    setPendingPreset({ id: COMBO_45L.id, name: COMBO_45L.name, parts: COMBO_45L.parts });
-    message.success(`已选中「${COMBO_45L.name}」，点击场景地面部署（Esc 取消）`);
+    setPendingPreset({
+      id: COMBO_45L.id,
+      name: COMBO_45L.name,
+      parts: COMBO_45L.parts,
+    });
+    message.success(
+      `已选中「${COMBO_45L.name}」，点击场景地面部署（Esc 取消）`,
+    );
   };
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-center gap-1.5 text-[12px] rounded-lg px-2 py-2" style={{ background: C.primarySoft, color: C.primary }}>
-        <AppstoreOutlined /> 点击配件，再点击 3D 场景地面放置
+    <div className="designer-library">
+      <label className="designer-search">
+        <Search size={16} aria-hidden="true" />
+        <input
+          name="part-search"
+          aria-label="搜索配件"
+          autoComplete="off"
+          placeholder="搜索配件名称…"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+      </label>
+      <div className="designer-categories" role="group" aria-label="配件分类">
+        <button
+          aria-pressed={category === 'all'}
+          onClick={() => setCategory('all')}
+        >
+          全部
+        </button>
+        {(Object.keys(CATEGORY_CONFIG) as PartCategory[]).map((key) => (
+          <button
+            key={key}
+            aria-pressed={category === key}
+            onClick={() => setCategory(key)}
+          >
+            {CATEGORY_CONFIG[key].name}
+          </button>
+        ))}
       </div>
-      {(Object.keys(CATEGORY_CONFIG) as PartCategory[]).map((cat) => {
+      {categories.map((cat) => {
         const parts = partsByCategory[cat];
-        if (parts.length === 0) return null;
-        const config = CATEGORY_CONFIG[cat];
+        if (parts.length === 0 && !(cat === 'connector' && comboVisible))
+          return null;
         return (
-          <div key={cat}>
-            <div className="text-[11px] font-medium mb-1.5 flex items-center gap-1" style={{ color: C.text2 }}>
-              {config.name} <span className="text-[10px]">· {config.description}</span>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
+          <section
+            key={cat}
+            className="designer-part-section"
+            aria-label={CATEGORY_CONFIG[cat].name}
+          >
+            <h3>
+              {CATEGORY_CONFIG[cat].name}
+              <span>{CATEGORY_CONFIG[cat].description}</span>
+            </h3>
+            <div className="designer-parts-grid">
               {parts.map((part) => (
                 <PartCard key={part.id} part={part} onPick={pick} />
               ))}
-              {/* 45°L嵌套组合：作为基本配件库中的一体卡片，点击部署两个独立连接件 */}
-              {cat === 'connector' && (
-                <div
-                  className="p-2.5 rounded-xl bg-white cursor-pointer border transition-all select-none"
-                  style={{ borderColor: 'transparent', boxShadow: '0 2px 8px rgba(0,0,0,0.06)' }}
-                  onClick={armCombo}
-                  onMouseEnter={(e) => (e.currentTarget.style.borderColor = `${C.primary}66`)}
-                  onMouseLeave={(e) => (e.currentTarget.style.borderColor = 'transparent')}
-                >
-                  <div className="h-9 rounded-lg mb-1.5 grid place-items-center" style={{ background: 'rgba(74,144,217,0.06)' }}>
-                    <div className="flex items-center -space-x-1">
-                      <div style={{ width: 22, height: 22, borderRadius: '50%', backgroundColor: '#2B2B2B', boxShadow: '0 2px 4px rgba(0,0,0,0.3)' }} />
-                      <div style={{ width: 20, height: 20, borderRadius: '50%', backgroundColor: '#2B2B2B', boxShadow: '0 2px 4px rgba(0,0,0,0.3)' }} />
-                    </div>
+              {cat === 'connector' && comboVisible && (
+                <button className="designer-combo-card" onClick={armCombo}>
+                  <div className="designer-combo-images">
+                    {COMBO_45L.parts.map((item) => {
+                      const definition = getPartById(item.partId);
+                      return definition ? (
+                        <PartThumbnail
+                          key={item.id}
+                          part={definition}
+                          color="#2B2B2B"
+                        />
+                      ) : null;
+                    })}
                   </div>
-                  <div className="text-[12px] font-medium truncate" style={{ color: C.text }}>
-                    {COMBO_45L.name}
-                  </div>
-                  <div className="text-[10px] mb-1.5" style={{ color: C.text2 }}>
-                    45°套筒端 ⊂ L两通端
-                  </div>
-                  <span className="px-2 py-0.5 rounded-full text-[10px] font-medium" style={{ background: C.primarySoft, color: C.primary }}>
-                    两件组合
-                  </span>
-                </div>
+                  <strong>{COMBO_45L.name}</strong>
+                  <span>两件嵌套组合</span>
+                </button>
               )}
             </div>
-          </div>
+          </section>
         );
       })}
+      {!comboVisible &&
+        categories.every((key) => partsByCategory[key].length === 0) && (
+          <Empty
+            description="没有匹配的配件，请更换搜索词"
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+          />
+        )}
     </div>
   );
 }
@@ -633,7 +689,9 @@ const RAIL_ITEMS: { key: SectionKey; icon: React.ReactNode; label: string; prese
 
 export function RightPanel({ collapsed, onToggle }: RightPanelProps) {
   const [active, setActive] = useState<SectionKey>('parts');
-  const [presetSub, setPresetSub] = useState<'basic' | 'preset' | 'ext'>('basic');
+  const [presetSub, setPresetSub] = useState<'basic' | 'preset' | 'ext'>(
+    'basic',
+  );
   const viewMode = useStore((state) => state.viewMode);
   const exitCompare = useStore((state) => state.exitCompare);
   const diffActive = viewMode === 'diff';
@@ -647,10 +705,10 @@ export function RightPanel({ collapsed, onToggle }: RightPanelProps) {
   const title = diffActive
     ? { icon: <DiffOutlined />, label: '版本对比' }
     : active === 'save'
-    ? { icon: <FolderOpenOutlined />, label: '存储方案' }
-    : active === 'stats'
-    ? { icon: <BarChartOutlined />, label: '统计信息' }
-    : { icon: <AppstoreOutlined />, label: '配件库' };
+      ? { icon: <FolderOpenOutlined />, label: '存储方案' }
+      : active === 'stats'
+        ? { icon: <BarChartOutlined />, label: '统计信息' }
+        : { icon: <AppstoreOutlined />, label: '配件库' };
 
   // 展开面板主体内容
   let body: React.ReactNode = null;
@@ -661,111 +719,88 @@ export function RightPanel({ collapsed, onToggle }: RightPanelProps) {
   } else if (active === 'stats') {
     body = <PartsSummary />;
   } else {
-    // 配件库（含 基本配件 / 基本模块 子切换）
-    body = (
-      <div className="space-y-3">
-        <div className="flex items-center gap-1 rounded-full p-1" style={{ background: C.bg }}>
-          <button
-            onClick={() => setPresetSub('basic')}
-            className="flex-1 h-8 rounded-full text-[13px] font-medium transition-all"
-            style={presetSub === 'basic' ? { background: '#fff', color: C.primary, boxShadow: '0 2px 8px rgba(0,0,0,0.08)' } : { color: C.text2 }}
-          >
-            基本配件
-          </button>
-          <button
-            onClick={() => setPresetSub('preset')}
-            className="flex-1 h-8 rounded-full text-[13px] font-medium transition-all"
-            style={presetSub === 'preset' ? { background: '#fff', color: C.accent, boxShadow: '0 2px 8px rgba(0,0,0,0.08)' } : { color: C.text2 }}
-          >
-            基本模块
-          </button>
-          <button
-            onClick={() => setPresetSub('ext')}
-            className="flex-1 h-8 rounded-full text-[13px] font-medium transition-all"
-            style={presetSub === 'ext' ? { background: '#fff', color: '#26C281', boxShadow: '0 2px 8px rgba(0,0,0,0.08)' } : { color: C.text2 }}
-          >
-            扩展配件
-          </button>
-        </div>
-        {presetSub === 'basic' ? <BasicPartsGrid /> : presetSub === 'preset' ? <PresetsPanel /> : <ExtensionPartsGrid />}
-      </div>
-    );
+    body =
+      presetSub === 'basic' ? (
+        <BasicPartsGrid />
+      ) : presetSub === 'preset' ? (
+        <PresetsPanel />
+      ) : (
+        <ExtensionPartsGrid />
+      );
   }
 
   return (
-    <aside className="shrink-0 flex relative z-30">
-      {/* ===== 窄竖条 icon 轨道 ===== */}
-      <div
-        className="w-12 shrink-0 flex flex-col items-center gap-1 py-2 pt-4"
-        style={{ background: C.railBg, borderLeft: `1px solid ${C.line}` }}
-      >
-        {RAIL_ITEMS.map((item, i) => {
-          const key = `${item.key}-${item.presetSub || i}`;
-          const isActive = !diffActive && active === item.key && (item.presetSub ? presetSub === item.presetSub : true);
+    <aside
+      className={`designer-sidebar${collapsed ? ' is-collapsed' : ''}`}
+      aria-label="配件和方案管理"
+    >
+      <nav className="designer-sidebar-tabs" aria-label="侧栏功能">
+        {RAIL_ITEMS.map((item, index) => {
+          const isActive =
+            !diffActive &&
+            active === item.key &&
+            (item.presetSub ? presetSub === item.presetSub : true);
           return (
-            <Tooltip key={key} title={item.label} placement="left">
+            <Tooltip
+              key={`${item.key}-${item.presetSub || index}`}
+              title={collapsed ? item.label : undefined}
+            >
               <button
                 onClick={() => openSection(item.key, item.presetSub)}
-                className="w-10 h-10 rounded-xl grid place-items-center transition-colors"
-                style={isActive ? { background: C.primarySoft, color: C.primary } : { color: C.text2 }}
+                aria-label={item.label}
+                aria-pressed={isActive}
               >
-                <span className="text-base">{item.icon}</span>
+                <span aria-hidden="true">{item.icon}</span>
+                <span className="designer-tab-label">{item.label}</span>
               </button>
             </Tooltip>
           );
         })}
-        <span className="w-6 h-px my-1" style={{ background: C.line }} />
-        <Tooltip title={collapsed ? '展开面板' : '收起面板'} placement="left">
-          <button
-            onClick={onToggle}
-            className="w-10 h-10 rounded-xl grid place-items-center transition-colors"
-            style={{ color: C.text2 }}
-          >
-            {collapsed ? <LeftOutlined /> : <RightOutlined />}
+        {collapsed && (
+          <button onClick={onToggle} aria-label="展开面板">
+            <LeftOutlined />
           </button>
-        </Tooltip>
-      </div>
-
-      {/* ===== 展开的主面板 ===== */}
+        )}
+      </nav>
       {!collapsed && (
-        <div className="w-[340px] flex flex-col overflow-hidden shadow-[-6px_0_18px_rgba(0,0,0,0.06)]" style={{ background: C.bg }} data-testid="right-panel">
-          {/* 面板标题 */}
-          <div className="h-12 shrink-0 flex items-center justify-between px-3" style={{ background: C.card, borderBottom: `1px solid ${C.line}` }}>
-            <div className="flex items-center gap-2 text-sm font-semibold" style={{ color: C.text }}>
-              <span style={{ color: C.primary }}>{title.icon}</span>
-              <span>{title.label}</span>
-            </div>
-            <div className="flex items-center gap-1">
-              {!diffActive ? (
-                <Tooltip title="在存储方案中选择方案进行对比" placement="left">
-                  <button
-                    onClick={() => { setActive('save'); if (collapsed) onToggle(); }}
-                    className="h-8 px-2 rounded-lg text-[12px] flex items-center gap-1 transition-colors hover:bg-surface-container"
-                    style={{ color: C.text2 }}
-                  >
-                    <DiffOutlined /> 对比
-                  </button>
-                </Tooltip>
+        <>
+          <div className="designer-panel-header">
+            <h2>
+              {diffActive
+                ? title.label
+                : active === 'parts'
+                  ? presetSub === 'basic'
+                    ? '挑选你的配件'
+                    : presetSub === 'preset'
+                      ? '基本模块'
+                      : '扩展配件'
+                  : title.label}
+            </h2>
+            <div>
+              {diffActive ? (
+                <button onClick={exitCompare}>
+                  <CloseOutlined />
+                  退出对比
+                </button>
               ) : (
-                <button
-                  onClick={exitCompare}
-                  className="h-8 px-2 rounded-lg text-[12px] flex items-center gap-1"
-                  style={{ color: C.error, background: C.errorSoft }}
-                >
-                  <CloseOutlined /> 退出
+                <button onClick={() => setActive('save')}>
+                  <DiffOutlined />
+                  对比
                 </button>
               )}
-              <Tooltip title="收起面板" placement="left">
-                <button onClick={onToggle} className="w-8 h-8 rounded-lg grid place-items-center transition-colors" style={{ color: C.text2 }}>
-                  <DoubleRightOutlined />
-                </button>
-              </Tooltip>
+              <button onClick={onToggle} aria-label="收起面板" title="收起面板">
+                <DoubleRightOutlined />
+              </button>
             </div>
           </div>
-
-          {/* 滚动内容 */}
-          <div className="flex-1 overflow-y-auto p-3">{body}</div>
-        </div>
+          <div className="designer-panel-body" data-testid="right-panel">
+            {body}
+          </div>
+          <div className="designer-panel-footer">
+            <AppstoreOutlined />
+            点击配件，再点击场景地面放置
+          </div>
+        </>
       )}
     </aside>
   );
