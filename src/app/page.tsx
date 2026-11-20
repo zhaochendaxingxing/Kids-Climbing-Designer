@@ -5,19 +5,19 @@ import { Tooltip, Button, Popover, message } from 'antd';
 import {
   UndoOutlined,
   RedoOutlined,
-  ControlOutlined,
+  ApartmentOutlined,
   DownloadOutlined,
   BgColorsOutlined,
-  SelectOutlined,
+  BorderOutlined,
 } from '@ant-design/icons';
 import dynamic from 'next/dynamic';
-import { Cuboid, Save, Hand, Rotate3D, Maximize2 } from 'lucide-react';
+import { Check, Cuboid, Save, Hand, Orbit, Focus, Paintbrush } from 'lucide-react';
 import './workspace.css';
 import { RightPanel } from '@/components/ui/RightPanel';
 import WorkflowTab from '@/components/ui/WorkflowTab';
 import { useStore } from '@/store/useStore';
-import { PART_COLORS, CATEGORY_CONFIG, getPartById } from '@/data/parts';
-import type { PartCategory } from '@/types/parts';
+import { PART_COLORS, getPartById } from '@/data/parts';
+
 
 // 动态导入 3D 场景（避免 SSR 问题）
 const Scene3D = dynamic(() => import('@/components/three/Scene3D'), {
@@ -41,8 +41,6 @@ export default function HomePage() {
     (project) => project.id === currentProjectId,
   );
   const saveProject = useStore((state) => state.saveProject);
-  const snapEnabled = useStore((s) => s.snapEnabled);
-  const setSnapEnabled = useStore((s) => s.setSnapEnabled);
   const gizmoMode = useStore((s) => s.gizmoMode);
   const setGizmoMode = useStore((s) => s.setGizmoMode);
   const navMode = useStore((s) => s.navMode);
@@ -52,13 +50,6 @@ export default function HomePage() {
   const parts = useStore((s) => s.parts);
   const paintSelected = useStore((s) => s.paintSelected);
   const randomColorSelected = useStore((s) => s.randomColorSelected);
-  const replaceSelectedConnectors = useStore(
-    (s) => s.replaceSelectedConnectors,
-  );
-  const optimizeSelectedConnectors = useStore(
-    (s) => s.optimizeSelectedConnectors,
-  );
-  const selectByCategory = useStore((s) => s.selectByCategory);
   const undo = useStore((s) => s.undo);
   const redo = useStore((s) => s.redo);
   const exportJSON = useStore((s) => s.exportJSON);
@@ -66,45 +57,58 @@ export default function HomePage() {
   const setWorkflow = useStore((s) => s.setWorkflow);
   const generateFramework = useStore((s) => s.generateFramework);
   const [paintOpen, setPaintOpen] = useState(false);
-  const [selSameOpen, setSelSameOpen] = useState(false);
+  const [batchTool, setBatchTool] = useState<'junction' | 'bar' | 'platform' | null>(null);
+  const [randomPalette, setRandomPalette] = useState<string[] | null>(null);
   const [panelCollapsed, setPanelCollapsed] = useState(false);
   const [fwLayers, setFwLayers] = useState(3);
   const [fwCols, setFwCols] = useState(2);
   const [fwDepth, setFwDepth] = useState(2);
   const panelToggle = () => setPanelCollapsed((c) => !c);
 
-  // “全选同类”当前选中的分类（菜单主题）
-  const [pickCat, setPickCat] = useState<PartCategory | null>(null);
-  // 与“基本配件”分项一致的三类
-  const PICK_CATS = [
-    { key: 'bar' as PartCategory, name: CATEGORY_CONFIG.bar.name, icon: '杆' },
-    {
-      key: 'connector' as PartCategory,
-      name: CATEGORY_CONFIG.connector.name,
-      icon: '连',
-    },
-    {
-      key: 'platform' as PartCategory,
-      name: CATEGORY_CONFIG.platform.name,
-      icon: '板',
-    },
-  ];
-  const catCountFor = (cat: PartCategory) =>
-    parts.filter((p) => getPartById(p.partId)?.category === cat).length;
-  const pickCatName = pickCat
-    ? pickCat === 'bar'
-      ? '杆件'
-      : pickCat === 'connector'
-        ? '连接件'
-        : '平台板'
-    : '';
-
-  // 全选同类：取消移动/生长/上色等一切操作，仅弹出分类菜单
-  const handleSelectSame = () => {
-    setPaintColor(null);
-    setGizmoMode('move');
-    setSelSameOpen(true);
+  const closeToolMenus = () => {
+    setPaintOpen(false);
+    setBatchTool(null);
+    setRandomPalette(null);
   };
+
+  const runBatchColor = (category: 'bar' | 'platform', color: string | string[]) => {
+    const state = useStore.getState();
+    state.selectByCategory(category);
+    if (typeof color === 'string') paintSelected(color);
+    else randomColorSelected(color);
+    setBatchTool(null);
+    setRandomPalette(null);
+  };
+
+  const changeJunctions = (mode: 'six' | 'optimize') => {
+    const state = useStore.getState();
+    // Custom and nested fittings have purpose-built sockets outside this operation.
+    const nested = new Set(state.groups
+      .filter(group => group.memberIds.some(id => state.parts.some(part => part.id === id && part.partId === 'connector-45deg-nest')))
+      .flatMap(group => group.memberIds));
+    const ids = state.parts.filter(part =>
+      getPartById(part.partId)?.connectorSpec
+      && !part.partId.startsWith('connector-45') && part.partId !== 'connector-bazi' && !nested.has(part.id),
+    ).map(part => part.id);
+    if (!ids.length) {
+      message.info('当前方案没有可批量调整的常规连接件。');
+      return;
+    }
+    state.setSelection(ids, ids[0]);
+    if (mode === 'six') state.replaceSelectedConnectors('connector-v6');
+    else state.optimizeSelectedConnectors();
+    setBatchTool(null);
+  };
+  const toggleView = (mode: 'pan' | 'rotate') => {
+    closeToolMenus();
+    setNavMode(navMode === mode ? 'none' : mode);
+  };
+
+  const activeToolHint = navMode === 'pan'
+    ? '平移视角：按住左键拖动，移动观察位置。'
+    : navMode === 'rotate'
+      ? '环绕视角：按住左键拖动，从不同角度查看模型。'
+      : paintColor ? '配件上色：点击杆件或平台板应用所选颜色。' : null;
 
   useEffect(() => {
     if (useStore.getState().projects.length === 0) {
@@ -165,6 +169,11 @@ export default function HomePage() {
       <div className="designer-toolbar">
         <WorkflowTab
           section="modes"
+          suspended={!!activeToolHint}
+          onActivate={() => {
+            setNavMode('none');
+            closeToolMenus();
+          }}
           workflow={workflow}
           gizmoMode={gizmoMode}
           setWorkflow={setWorkflow}
@@ -177,98 +186,26 @@ export default function HomePage() {
           depth={fwDepth}
           setDepth={setFwDepth}
           setPaintColor={setPaintColor}
-          setSelSameOpen={setSelSameOpen}
         />
         <div className="designer-toolbar-tools">
-          {/* 历史 / 视图操作 */}
-          <div
-            className="designer-view-tools"
-            role="group"
-            aria-label="历史与视角"
-          >
-            <Tooltip title="撤销 (Ctrl+Z)">
-              <button
-                className="w-8 h-8 rounded-full grid place-items-center transition-colors hover:bg-white hover:text-primary"
-                style={{ color: C.text2 }}
-                aria-label="撤销"
-                onClick={undo}
-              >
-                <UndoOutlined />
-              </button>
-            </Tooltip>
-            <Tooltip title="重做 (Ctrl+Y)">
-              <button
-                className="w-8 h-8 rounded-full grid place-items-center transition-colors hover:bg-white hover:text-primary"
-                style={{ color: C.text2 }}
-                aria-label="重做"
-                onClick={redo}
-              >
-                <RedoOutlined />
-              </button>
-            </Tooltip>
-            <span className="w-px h-5 mx-1" style={{ background: C.line }} />
-            <Tooltip title="移动视角（平移观察）：点击后鼠标变为小手，按住左键拖拽可平移视角；再次点击退出">
-              <button
-                className="w-8 h-8 rounded-full grid place-items-center transition-colors hover:bg-white hover:text-primary"
-                style={
-                  navMode === 'pan'
-                    ? {
-                        background: C.primary,
-                        color: '#fff',
-                        boxShadow: '0 2px 8px rgba(0,0,0,0.12)',
-                      }
-                    : { color: C.text2 }
-                }
-                aria-label="移动视角"
-                onClick={() => {
-                  setNavMode(navMode === 'pan' ? 'none' : 'pan');
-                  setSelSameOpen(false);
-                }}
-              >
-                <Hand size={17} aria-hidden="true" />
-              </button>
-            </Tooltip>
-            <Tooltip title="旋转视角（围绕模型旋转）：点击后鼠标变为旋转图标，按住左键拖拽可旋转视角；再次点击退出">
-              <button
-                className="w-8 h-8 rounded-full grid place-items-center transition-colors hover:bg-white hover:text-primary"
-                style={
-                  navMode === 'rotate'
-                    ? {
-                        background: C.primary,
-                        color: '#fff',
-                        boxShadow: '0 2px 8px rgba(0,0,0,0.12)',
-                      }
-                    : { color: C.text2 }
-                }
-                aria-label="旋转视角"
-                onClick={() => {
-                  setNavMode(navMode === 'rotate' ? 'none' : 'rotate');
-                  setSelSameOpen(false);
-                }}
-              >
-                <Rotate3D size={18} aria-hidden="true" />
-              </button>
-            </Tooltip>
-            <Tooltip title="居中视角（重置观察方向）">
-              <button
-                className="w-8 h-8 rounded-full grid place-items-center transition-colors hover:bg-white hover:text-primary"
-                style={{ color: C.text2 }}
-                aria-label="居中模型"
-                onClick={() =>
-                  window.dispatchEvent(new CustomEvent('gizmo-reset-camera'))
-                }
-              >
-                <Maximize2 size={17} aria-hidden="true" />
-              </button>
-            </Tooltip>
-          </div>
-
-          {/* 编辑工具：油漆桶 / 全选同类 / 吸附 */}
-          <div className="designer-edit-tools">
+          <div className="designer-tool-section">
+            <span className="designer-tool-label">编辑</span>
+            <div className="designer-edit-tools" role="group" aria-label="编辑">
+              <div className="designer-tool-buttons" role="group" aria-label="历史">
+                <Tooltip title="撤销 (Ctrl+Z)">
+                  <button type="button" aria-label="撤销" onClick={undo}><UndoOutlined /></button>
+                </Tooltip>
+                <Tooltip title="重做 (Ctrl+Y)">
+                  <button type="button" aria-label="重做" onClick={redo}><RedoOutlined /></button>
+                </Tooltip>
+              </div>
             <Popover
               trigger="click"
               open={paintOpen}
-              onOpenChange={setPaintOpen}
+              onOpenChange={(open) => {
+                setPaintOpen(open);
+                if (open) setBatchTool(null);
+              }}
               placement="bottom"
               content={
                 <div className="w-60 p-2">
@@ -284,8 +221,9 @@ export default function HomePage() {
                         key={c.id}
                         title={c.name}
                         onClick={() => {
+                          setNavMode('none');
                           setPaintColor(c.id);
-                          setSelSameOpen(false);
+                          setBatchTool(null);
                           setPaintOpen(false);
                         }}
                         className="w-8 h-8 rounded-full cursor-pointer border transition-all"
@@ -329,6 +267,7 @@ export default function HomePage() {
             >
               <Tooltip title="油漆桶：选色后点按杆件/平台板直接上色">
                 <button
+                  aria-pressed={!!paintColor}
                   className="flex items-center gap-1.5 px-3 h-8 rounded-full text-[13px] font-medium border transition-all"
                   style={
                     paintColor
@@ -344,195 +283,105 @@ export default function HomePage() {
                         }
                   }
                 >
-                  <BgColorsOutlined /> {paintColor ? '上色中' : '油漆桶'}
+                  <BgColorsOutlined /> {paintColor ? '上色中' : '配件上色'}
                 </button>
               </Tooltip>
             </Popover>
 
-            <Popover
-              trigger="click"
-              open={selSameOpen}
-              onOpenChange={(v) => {
-                setSelSameOpen(v);
-                if (!v) setPickCat(null);
-              }}
-              placement="bottom"
-              content={
-                <div className="w-72 p-2">
-                  <div
-                    className="text-[12px] font-semibold mb-1.5"
-                    style={{ color: C.text }}
-                  >
-                    按类型全选同类
+              <Popover
+                trigger="click"
+                open={batchTool === 'junction'}
+                onOpenChange={open => {
+                  setBatchTool(current => open ? 'junction' : current === 'junction' ? null : current);
+                  if (open) setPaintOpen(false);
+                }}
+                placement="bottom"
+                title="调整全部常规连接件"
+                content={
+                  <div className="designer-batch-menu">
+                    <button type="button" onClick={() => changeJunctions('six')}>
+                      <strong>全六通</strong><span>统一为六向连接件</span>
+                    </button>
+                    <button type="button" onClick={() => changeJunctions('optimize')}>
+                      <strong>全优化</strong><span>根据现有接线精简接口</span>
+                    </button>
                   </div>
-                  <div className="flex flex-col gap-1.5">
-                    {PICK_CATS.map((c) => {
-                      const count = catCountFor(c.key);
-                      const active = pickCat === c.key;
-                      return (
-                        <button
-                          key={c.key}
-                          onClick={() => {
-                            selectByCategory(c.key);
-                            setPickCat(c.key);
-                          }}
-                          className="flex items-center justify-between px-3 h-8 rounded-full text-[12px] font-medium transition-all"
-                          style={
-                            active
-                              ? {
-                                  background: 'rgba(74,144,217,0.12)',
-                                  color: C.primary,
-                                  border: '1px solid rgba(74,144,217,0.4)',
-                                }
-                              : {
-                                  background: C.bgSurfaceCont,
-                                  color: C.text2,
-                                  border: '1px solid transparent',
-                                }
-                          }
-                        >
-                          <span>
-                            {c.name}（{c.icon}）
-                          </span>
-                          <span>{count} 件</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  {pickCat && (
-                    <div
-                      className="mt-3 border-t pt-2.5"
-                      style={{ borderColor: C.line }}
-                    >
-                      <div
-                        className="text-[12px] font-semibold mb-1.5"
-                        style={{ color: C.text }}
-                      >
-                        统一调整 · {pickCatName}（{catCountFor(pickCat)} 件）
+                }
+              >
+                <button type="button" className="designer-edit-action" aria-expanded={batchTool === 'junction'}>
+                  <ApartmentOutlined /> 接点优化
+                </button>
+              </Popover>
+              {([
+                { category: 'bar', label: '杆件批量上色', icon: <Paintbrush size={14} /> },
+                { category: 'platform', label: '板件批量上色', icon: <BorderOutlined /> },
+              ] as const).map(({ category, label, icon }) => {
+                const count = parts.filter(part => getPartById(part.partId)?.category === category).length;
+                return (
+                  <Popover
+                    key={category}
+                    trigger="click"
+                    open={batchTool === category}
+                    onOpenChange={open => {
+                      setBatchTool(current => open ? category : current === category ? null : current);
+                      if (open) {
+                        setPaintOpen(false);
+                        setRandomPalette(null);
+                      }
+                    }}
+                    placement="bottom"
+                    title={`为 ${count} 件${category === 'bar' ? '杆件' : '板件'}上色`}
+                    content={
+                      <div className="designer-batch-colors">
+                        {randomPalette && <p className="designer-batch-hint">勾选要参与随机上色的颜色</p>}
+                        <div className="designer-batch-swatches" role="group" aria-label={randomPalette ? '随机上色色板' : '统一上色色板'}>
+                          {PART_COLORS.map(color => {
+                            const checked = randomPalette?.includes(color.id);
+                            return (
+                              <button key={color.id} type="button" title={color.name} aria-label={color.name}
+                                aria-pressed={checked} disabled={!count} style={{ background: color.hex }}
+                                onClick={() => {
+                                  if (!randomPalette) runBatchColor(category, color.id);
+                                  else setRandomPalette(current => current?.includes(color.id)
+                                    ? current.filter(id => id !== color.id) : [...(current ?? []), color.id]);
+                                }}>
+                                {checked && <Check size={14} aria-hidden="true" />}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <div className="designer-batch-actions">
+                          {randomPalette ? <>
+                            <Button size="small" onClick={() => setRandomPalette(null)}>返回</Button>
+                            <Button size="small" type="primary" disabled={!count || !randomPalette.length}
+                              onClick={() => runBatchColor(category, randomPalette)}>
+                              随机上色{randomPalette.length > 0 ? `（${randomPalette.length} 色）` : ''}
+                            </Button>
+                          </> : <Button size="small" disabled={!count} onClick={() => setRandomPalette([])}>随机上色</Button>}
+                        </div>
                       </div>
-                      {pickCat === 'bar' || pickCat === 'platform' ? (
-                        <>
-                          <div
-                            className="text-[11px] mb-1"
-                            style={{ color: C.text2 }}
-                          >
-                            统一着色
-                          </div>
-                          <div className="flex flex-wrap gap-1.5">
-                            {PART_COLORS.map((c) => (
-                              <button
-                                key={c.id}
-                                title={c.name}
-                                onClick={() => paintSelected(c.id)}
-                                className="w-6 h-6 rounded-full cursor-pointer border"
-                                style={{
-                                  background: c.hex,
-                                  borderColor: C.line,
-                                }}
-                              />
-                            ))}
-                          </div>
-                          {pickCat === 'bar' && (
-                            <button
-                              onClick={() => randomColorSelected()}
-                              className="mt-2.5 w-full text-[12px] font-medium h-8 rounded-full transition-colors"
-                              style={{
-                                background: 'rgba(247,202,69,0.14)',
-                                color: '#B98A00',
-                                border: '1px solid #F0D98A',
-                              }}
-                            >
-                              随机上色
-                            </button>
-                          )}
-                        </>
-                      ) : (
-                        <>
-                          <div
-                            className="text-[11px] mb-1 leading-relaxed"
-                            style={{ color: C.text2 }}
-                          >
-                            依据接线情况统一处理连接件：
-                          </div>
-                          <button
-                            onClick={() => {
-                              replaceSelectedConnectors('connector-v6');
-                            }}
-                            className="mt-1.5 w-full text-[12px] font-medium h-8 rounded-full transition-colors"
-                            style={{
-                              background: 'rgba(74,144,217,0.1)',
-                              color: C.primary,
-                              border: '1px solid rgba(74,144,217,0.35)',
-                            }}
-                          >
-                            统一调成六向连接件
-                          </button>
-                          <button
-                            onClick={() => {
-                              optimizeSelectedConnectors();
-                            }}
-                            className="mt-2 w-full text-[12px] font-medium h-8 rounded-full transition-colors"
-                            style={{
-                              background: 'rgba(38,194,129,0.12)',
-                              color: '#1A9F66',
-                              border: '1px solid rgba(38,194,129,0.4)',
-                            }}
-                          >
-                            自动精简空闲连接端
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  )}
-                </div>
-              }
-            >
-              <Tooltip title="弹出分类菜单，选择杆件/连接件/平台板即可整类全选，并统一调整颜色或连接端">
-                <button
-                  className="flex items-center gap-1.5 px-3 h-8 rounded-full text-[13px] font-medium border transition-all"
-                  style={
-                    selSameOpen
-                      ? {
-                          background: 'rgba(74,144,217,0.12)',
-                          color: C.primary,
-                          borderColor: 'rgba(74,144,217,0.4)',
-                        }
-                      : {
-                          background: '#fff',
-                          color: C.text2,
-                          borderColor: C.line,
-                        }
-                  }
-                  onClick={handleSelectSame}
-                  aria-label="全选同类"
-                >
-                  <SelectOutlined /> 全选同类
-                </button>
-              </Tooltip>
-            </Popover>
-
-            <Button
-              className="flex items-center rounded-full text-[13px]"
-              style={
-                snapEnabled
-                  ? {
-                      background: 'rgba(38,194,129,0.12)',
-                      color: '#1A9F66',
-                      border: '1px solid rgba(38,194,129,0.4)',
                     }
-                  : { background: '#fff', color: C.text2, borderColor: C.line }
-              }
-              icon={<ControlOutlined />}
-              onClick={() => setSnapEnabled(!snapEnabled)}
-            >
-              吸附 {snapEnabled ? 'ON' : 'OFF'}
-            </Button>
+                  >
+                    <button type="button" className="designer-edit-action" aria-label={label} aria-expanded={batchTool === category}>
+                      {icon} {label}
+                    </button>
+                  </Popover>
+                );
+              })}
+            </div>
           </div>
         </div>
       </div>
-
-      {/* 全选同类·点选模式提示横幅 */}
+      {activeToolHint && (
+        <div className="designer-tool-status">
+          <span role="status">{activeToolHint}</span>
+          <button type="button" onClick={() => {
+            setNavMode('none');
+            setPaintColor(null);
+            closeToolMenus();
+          }}>返回搭建</button>
+        </div>
+      )}
       {/* ===================== 主体 ===================== */}
       <div className="designer-main">
         {/* 工作区：3D 场景 */}
@@ -553,11 +402,23 @@ export default function HomePage() {
             depth={fwDepth}
             setDepth={setFwDepth}
             setPaintColor={setPaintColor}
-            setSelSameOpen={setSelSameOpen}
           />
-          <div className="designer-scene-label">
-            <span className="designer-status-dot" />
-            3D 搭建工作区
+          <div className="designer-view-dock" role="group" aria-label="视角">
+            <Tooltip title="平移视角">
+              <button type="button" aria-label="移动视角" aria-pressed={navMode === 'pan'} onClick={() => toggleView('pan')}>
+                <Hand size={19} aria-hidden="true" /><span>平移</span>
+              </button>
+            </Tooltip>
+            <Tooltip title="环绕观察模型">
+              <button type="button" aria-label="旋转视角" aria-pressed={navMode === 'rotate'} onClick={() => toggleView('rotate')}>
+                <Orbit size={20} aria-hidden="true" /><span>环绕</span>
+              </button>
+            </Tooltip>
+            <Tooltip title="居中模型并重置视角">
+              <button type="button" aria-label="居中模型" onClick={() => window.dispatchEvent(new CustomEvent('gizmo-reset-camera'))}>
+                <Focus size={20} aria-hidden="true" /><span>居中</span>
+              </button>
+            </Tooltip>
           </div>
           <div className="designer-scene-hint">
             {parts.length === 0

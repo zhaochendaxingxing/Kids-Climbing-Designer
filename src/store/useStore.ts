@@ -1,8 +1,9 @@
 import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
 import * as THREE from 'three';
-import type { PlacedPart, SceneGroup, DesignProject, DesignDiff, PartDiffItem, ViewMode, PartCategory } from '@/types/parts';
-import { getPartById, PART_COLORS, PARTS_LIBRARY } from '@/data/parts';
+import type { PlacedPart, SceneGroup, DesignProject, DesignDiff, PartDiffItem, ViewMode, PartCategory, PresetUnit } from '@/types/parts';
+import { getPartById, getPartColor, PART_COLORS, DEFAULT_FRAME_COLOR } from '@/data/parts';
+import { findOptimizedConnector } from '@/lib/construction';
 
 // 内部状态类型
 interface InternalState {
@@ -25,12 +26,6 @@ function snapPosition(pos: [number, number, number]): [number, number, number] {
 // 实现：先算出每个连接件被占用的接口在世界坐标下的方向集合；再在所有轴向连接件中找
 //       一个「接口数一致、且可通过旋转把自身接口精确对齐到这些方向」的型号，替换并带上该旋转。
 
-// 方向向量 → 精确坐标键（保留角度；斜向不会被压成轴向）
-function vecKey(v: THREE.Vector3): string {
-  const r = (x: number) => Math.round(x * 1000) / 1000;
-  return `${r(v.x)},${r(v.y)},${r(v.z)}`;
-}
-
 // 把方向向量吸附到最近坐标轴（消除旋转/浮点带来的微分量）：
 // 仅当某分量远小于主导分量时归零；真正的斜向（如45°）不会被改动
 function snapToAxis(v: THREE.Vector3): THREE.Vector3 {
@@ -41,91 +36,6 @@ function snapToAxis(v: THREE.Vector3): THREE.Vector3 {
   if (ay === 0 || ay / m < 1e-4) v.y = 0;
   if (az === 0 || az / m < 1e-4) v.z = 0;
   return v.normalize();
-}
-
-// 两个单位方向 a→ap、b→bp 的旋转（存在则返回 quaternion，否则 null，用于精确对齐接口）
-function twoVectorRotation(
-  aRaw: THREE.Vector3, apRaw: THREE.Vector3,
-  bRaw: THREE.Vector3, bpRaw: THREE.Vector3,
-): THREE.Quaternion | null {
-  const a = aRaw.clone().normalize();
-  const ap = apRaw.clone().normalize();
-  const b = bRaw.clone().normalize();
-  const bp = bpRaw.clone().normalize();
-  // 相对夹角必须一致（否则不可能同时对齐）
-  if (Math.abs(a.dot(b) - ap.dot(bp)) > 1e-3) return null;
-  // 第一步：a → ap
-  let q1: THREE.Quaternion;
-  const da = a.dot(ap);
-  if (da > 0.999999) q1 = new THREE.Quaternion();
-  else if (da < -0.999999) {
-    // 反平行：绕与 a 正交的任意轴转 180°
-    const cross = a.clone().cross(new THREE.Vector3(1, 0, 0));
-    const axis = cross.lengthSq() < 1e-6 ? a.clone().cross(new THREE.Vector3(0, 1, 0)) : cross;
-    q1 = new THREE.Quaternion().setFromAxisAngle(axis.normalize(), Math.PI);
-  } else {
-    q1 = new THREE.Quaternion().setFromUnitVectors(a, ap);
-  }
-  const b1 = b.clone().applyQuaternion(q1);
-  // 第二步：在垂直于 ap 的平面内把 b1 转到 bp（旋转轴为 ap 方向，故保持 ap 不动）
-  const proj1 = b1.clone().sub(ap.clone().multiplyScalar(b1.dot(ap)));
-  const proj2 = bp.clone().sub(ap.clone().multiplyScalar(bp.dot(ap)));
-  if (proj1.lengthSq() < 1e-6 || proj2.lengthSq() < 1e-6) {
-    // b 与 a 平行，无多余自由度；检查 b 是否已随 a 对齐
-    return vecKey(b1) === vecKey(bp) ? q1 : null;
-  }
-  const q2 = new THREE.Quaternion().setFromUnitVectors(proj1.normalize(), proj2.normalize());
-  q2.multiply(q1);
-  return q2;
-}
-
-function eulerFromQuat(q: THREE.Quaternion): THREE.Euler {
-  return new THREE.Euler().setFromQuaternion(q, 'XYZ');
-}
-
-// 局部接口方向集合能否通过（任意角度）旋转精确对齐为一组世界方向；能则返回 Euler，否则 null
-function matchDirsToUsed(localDirs: THREE.Vector3[], usedWorld: THREE.Vector3[]): THREE.Euler | null {
-  const n = localDirs.length;
-  if (n === 0 || n !== usedWorld.length) return null;
-  const loc = localDirs.map((v) => v.clone().normalize());
-  const used = usedWorld.map((v) => v.clone().normalize());
-  if (n === 1) return eulerFromQuat(new THREE.Quaternion().setFromUnitVectors(loc[0], used[0]));
-  const usedKeys = new Set<string>(used.map((v) => vecKey(v)));
-  const s0 = loc[0];
-  // 以「第一个接口 + 任选第二个接口」作为旋转锚点，枚举其在 used 中的落点
-  for (let i = 0; i < n; i++) {
-    const u0 = used[i];
-    for (let j = 1; j < n; j++) {
-      const s1 = loc[j];
-      for (let k = 0; k < n; k++) {
-        if (k === i) continue;
-        const u1 = used[k];
-        const q = twoVectorRotation(s0, u0, s1, u1);
-        if (!q) continue;
-        const set = new Set<string>(loc.map((v) => vecKey(v.clone().applyQuaternion(q))));
-        if (set.size !== n) continue;
-        let ok = true;
-        for (const key of set) if (!usedKeys.has(key)) { ok = false; break; }
-        if (ok) return eulerFromQuat(q);
-      }
-    }
-  }
-  return null;
-}
-
-// 找“接口数一致且可对齐到 used 方向”的连接件型号；返回 { partId, euler } 或 null
-function findOptimizedConnector(usedWorld: THREE.Vector3[]): { partId: string; euler: THREE.Euler } | null {
-  const n = usedWorld.length;
-  if (n === 0) return null;
-  for (const def of PARTS_LIBRARY) {
-    if (def.category !== 'connector') continue;
-    const localDirs = (def.connectionPoints || [])
-      .map((cp) => new THREE.Vector3(cp.direction[0], cp.direction[1], cp.direction[2]).normalize());
-    if (localDirs.length !== n) continue;
-    const euler = matchDirsToUsed(localDirs, usedWorld);
-    if (euler) return { partId: def.id, euler };
-  }
-  return null;
 }
 
 // 计算某连接件被占用接口的世界方向集合（每个被杆件端头贴合的接口对应一个方向）
@@ -242,10 +152,13 @@ function clampGroupToGround(parts: PlacedPart[], memberIds: Set<string>): Placed
   return parts.map((p) => (memberIds.has(p.id) ? { ...p, position: [p.position[0], p.position[1] + lift, p.position[2]] as [number, number, number] } : p));
 }
 
+type SceneSnapshot = { parts: PlacedPart[]; groups: SceneGroup[] };
 interface HistoryState {
-  past: PlacedPart[][];
-  future: PlacedPart[][];
+  past: SceneSnapshot[];
+  future: SceneSnapshot[];
 }
+
+type PlaceablePreset = Pick<PresetUnit, 'id' | 'name' | 'parts' | 'subgroups' | 'directPlacement'>;
 
 interface SceneState {
   // 场景中的配件
@@ -256,9 +169,10 @@ interface SceneState {
   /** Alt 复制时，当前处于“红色半透明幽灵”状态的副本 id（与原物重合时设置） */
   ghostCopyId: string | null;
   setGhostCopy: (id: string | null) => void;
-  pendingPreset: { id: string; name: string; parts: PlacedPart[] } | null;
-  setPendingPreset: (preset: { id: string; name: string; parts: PlacedPart[] } | null) => void;
-  addPresetGroup: (preset: { id: string; name: string; parts: PlacedPart[] }, dropPos: [number, number, number]) => void;
+  pendingPreset: PlaceablePreset | null;
+  setPendingPreset: (preset: PlaceablePreset | null) => void;
+  addPresetGroup: (preset: PlaceablePreset, dropPos: [number, number, number],
+    merge?: { replacements: PlacedPart[]; sharedIds: string[] }) => void;
   setSelection: (ids: string[], primaryId?: string | null) => void;
   releaseTick: number;
   bumpRelease: () => void;
@@ -283,8 +197,6 @@ interface SceneState {
   // 网格设置
   gridSize: number;
   gridVisible: boolean;
-  snapEnabled: boolean;
-  setSnapEnabled: (enabled: boolean) => void;
   
   // 旋转预览
   rotationPreviewEnabled: boolean;
@@ -318,14 +230,14 @@ interface SceneState {
   // 一键批量编辑（全选同类后）
   selectByCategory: (category: PartCategory) => void;
   paintSelected: (colorId: string) => void;
-  randomColorSelected: () => void;
+  randomColorSelected: (colorIds: readonly string[]) => void;
   replaceSelectedConnectors: (newPartId: string) => void;
   optimizeSelectedConnectors: () => void;
   selectedPartScreenPos: { x: number; y: number } | null;
   setSelectedPartScreenPos: (pos: { x: number; y: number } | null) => void;
   
   // 操作
-  addPart: (partId: string, position: [number, number, number], rotation?: [number, number, number], colorId?: string, skipHistory?: boolean, skipCollision?: boolean) => PlacedPart | undefined;
+  addPart: (partId: string, position: [number, number, number], rotation?: [number, number, number], colorId?: string, skipHistory?: boolean, skipCollision?: boolean, roofOutline?: PlacedPart['roofOutline']) => PlacedPart | undefined;
   removePart: (id: string) => void;
   removeSelected: () => void;
   updatePartPosition: (id: string, position: [number, number, number], skipCollision?: boolean) => void;
@@ -374,7 +286,6 @@ interface ProjectState {
   
   // 版本对比
   viewMode: ViewMode;
-  diffProjectId: string | null;
   diffResult: DesignDiff | null;
   
   // 操作
@@ -388,7 +299,7 @@ interface ProjectState {
   getCurrentProject: () => DesignProject | null;
   
   // 版本对比
-  startCompare: (projectId: string) => void;
+  startCompare: (beforeId: string, afterId: string) => void;
   exitCompare: () => void;
   computeDiff: (oldProject: DesignProject, newProject: DesignProject) => DesignDiff;
   
@@ -464,7 +375,6 @@ export const useStore = create<StoreState>((set, get) => ({
   cameraPosition: [150, 150, 200],
   gridSize: GRID_SIZE,
   gridVisible: true,
-  snapEnabled: true,
   rotationPreviewEnabled: false,
   rotationPreviewVariants: [],
   hoveredRotationIndex: null,
@@ -483,7 +393,6 @@ export const useStore = create<StoreState>((set, get) => ({
   savedPartsKey: STORAGE_KEY,
   
   viewMode: 'normal',
-  diffProjectId: null,
   diffResult: null,
   
   // ====== 历史记录 ======
@@ -492,14 +401,14 @@ export const useStore = create<StoreState>((set, get) => ({
   _pushHistory: () => {
     const state = get();
     const history = (state as unknown as InternalState)._history as HistoryState;
-    history.past.push(JSON.parse(JSON.stringify(state.parts)));
+    history.past.push(JSON.parse(JSON.stringify({ parts: state.parts, groups: state.groups })));
     if (history.past.length > 50) history.past.shift();
     history.future = [];
     set({ canUndo: history.past.length > 0, canRedo: false });
   },
   
   // ====== 配件操作 ======
-  addPart: (partId: string, position: [number, number, number], rotation?: [number, number, number], colorId?: string, skipHistory = false, skipCollision = false) => {
+  addPart: (partId, position, rotation, colorId, skipHistory = false, skipCollision = false, roofOutline) => {
     const state = get();
     const def = getPartById(partId);
     if (!def) {
@@ -511,9 +420,10 @@ export const useStore = create<StoreState>((set, get) => ({
       id: uuidv4(),
       partId,
       // 吸附命中时位置已精确对齐，跳过网格吸附
-      position: state.snapEnabled && !skipCollision ? snapPosition(position) : position,
+      position: !skipCollision ? snapPosition(position) : position,
       rotation: rotation || [0, 0, 0],
       colorId: colorId || def.defaultColor,
+      ...(roofOutline && { roofOutline }),
     };
     
     // 碰撞检测（吸附命中时允许嵌套重叠，跳过检测）
@@ -573,7 +483,7 @@ export const useStore = create<StoreState>((set, get) => ({
   updatePartPosition: (id: string, position: [number, number, number], skipCollision = false) => {
     const state = get();
     // 吸附命中时位置已精确对齐，跳过网格吸附
-    const snappedPos = state.snapEnabled && !skipCollision ? snapPosition(position) : position;
+    const snappedPos = !skipCollision ? snapPosition(position) : position;
     
     // 检查碰撞（吸附命中时允许嵌套重叠，跳过检测）
     const part = state.parts.find((p) => p.id === id);
@@ -783,13 +693,13 @@ export const useStore = create<StoreState>((set, get) => ({
       if (!idSet.has(p.id)) return p;
       const np = {
         ...p,
-        position: skipCollision || !state.snapEnabled ? position : snapPosition(position),
+        position: skipCollision ? position : snapPosition(position),
         ...(rotation ? { rotation } : {}),
       };
       return np;
     });
     // 碰撞检测：若任一目标碰撞（且未忽略），回滚
-    if (!skipCollision && state.snapEnabled) {
+    if (!skipCollision) {
       const newSet = parts.filter((p) => idSet.has(p.id));
       const others = parts.filter((p) => !idSet.has(p.id));
       for (const np of newSet) {
@@ -848,7 +758,7 @@ export const useStore = create<StoreState>((set, get) => ({
     if (!part || part.partId === newPartId) return;
     const def = getPartById(newPartId);
     if (!def) return;
-    const keepColor = (def.colors || []).some((c) => c.id === part.colorId);
+    const keepColor = !!getPartColor(def, part.colorId);
     // 杆件长度变化时，让新杆自动对齐到一端（默认对齐到已连接的一端；两端未连接则对齐 -X 端）
     let newPosition: [number, number, number] | undefined;
     const oldDef = getPartById(part.partId);
@@ -991,12 +901,12 @@ export const useStore = create<StoreState>((set, get) => ({
     set({ parts: [], groups: [], selectedIds: [], selectedPartId: null });
     const next: PlacedPart[] = [];
     const add = (partId: string, position: [number, number, number], rotation?: [number, number, number], colorId?: string) => {
-      const defaultColor = getPartById(partId)?.category === 'connector' ? 'black' : 'olive';
+      const defaultColor = getPartById(partId)?.category === 'connector' ? 'black' : DEFAULT_FRAME_COLOR.id;
       next.push({ id: uuidv4(), partId, position, rotation: rotation || [0, 0, 0], colorId: colorId || defaultColor });
     };
     // 格子边长：35cm 杆 + 连接件贴合（CONN_POINT_DIST*2 = 5cm）≈ 40cm
     const cell = 40;
-    // 用立六通连接件作为框架节点，杆件橄榄绿、连接件黑色。
+    // 用黑色立六通作为框架节点，杆件使用默认框架色。
     for (let z = 0; z <= depth; z++) {
       for (let x = 0; x <= cols; x++) {
         for (let y = 0; y <= layers; y++) {
@@ -1075,7 +985,9 @@ export const useStore = create<StoreState>((set, get) => ({
     });
   },
 
-  randomColorSelected: () => {
+  randomColorSelected: (colorIds) => {
+    const palette = PART_COLORS.filter(color => colorIds.includes(color.id));
+    if (!palette.length) return;
     const s = get();
     const sel = new Set(s.selectedIds);
     const affected = s.parts.some((p) => {
@@ -1090,7 +1002,7 @@ export const useStore = create<StoreState>((set, get) => ({
         if (!sel.has(p.id)) return p;
         const def = getPartById(p.partId);
         if (!def || (def.category !== 'bar' && def.category !== 'platform')) return p;
-        const rand = PART_COLORS[Math.floor(Math.random() * PART_COLORS.length)];
+        const rand = palette[Math.floor(Math.random() * palette.length)];
         return { ...p, colorId: rand.id };
       }),
     });
@@ -1100,15 +1012,15 @@ export const useStore = create<StoreState>((set, get) => ({
     const s = get();
     const sel = new Set(s.selectedIds);
     const def = getPartById(newPartId);
-    if (!def || def.category !== 'connector') return;
-    const affected = s.selectedIds.some((id) => getPartById(s.parts.find((p) => p.id === id)?.partId || '')?.category === 'connector');
+    if (!def?.connectorSpec) return;
+    const affected = s.parts.some(part => sel.has(part.id) && getPartById(part.partId)?.connectorSpec);
     if (!affected) return;
     s._pushHistory();
     set({
       parts: s.parts.map((p) => {
         if (!sel.has(p.id)) return p;
         const cdef = getPartById(p.partId);
-        if (!cdef || cdef.category !== 'connector' || p.partId === newPartId) return p;
+        if (!cdef?.connectorSpec || p.partId === newPartId) return p;
         const keep = (def.colors || []).some((c) => c.id === p.colorId);
         return { ...p, partId: newPartId, colorId: keep ? p.colorId : def.defaultColor };
       }),
@@ -1128,7 +1040,7 @@ export const useStore = create<StoreState>((set, get) => ({
       const target = findOptimizedConnector(used);
       if (process.env.NODE_ENV !== 'production') {
         // 供调试：打印每个被选连接件的占用方向与其拟替换目标
-        console.debug('[optimize]', p.partId, '@', p.position, 'used=', used.map((d) => vecKey(d)), '->', target ? target.partId : null);
+        console.debug('[optimize]', p.partId, '@', p.position, 'used=', used.map((d) => d.toArray()), '->', target ? target.partId : null);
       }
       if (!target) return p;
       const def = getPartById(target.partId);
@@ -1163,12 +1075,11 @@ export const useStore = create<StoreState>((set, get) => ({
     set({ hoveredRotationIndex: index });
   },
   
-  setSnapEnabled: (enabled: boolean) => {
-    set({ snapEnabled: enabled });
-  },
   
   setDraggingPart: (part: { partId: string; colorId: string } | null) => {
-    set({ draggingPart: part, ghostPosition: part ? [0, 10, 0] : null });
+    set({ draggingPart: part, ghostPosition: part ? [0, 10, 0] : null,
+      ...(part && { pendingPreset: null, selectedIds: [], selectedPartId: null,
+        paintColor: null, pickSameActive: false, navMode: 'none' as const }) });
   },
   
   setGhostCopy: (id: string | null) => {
@@ -1177,14 +1088,17 @@ export const useStore = create<StoreState>((set, get) => ({
   
   setPendingPreset: (preset) => {
     if (preset) {
-      set({ pendingPreset: preset, draggingPart: null, selectedIds: [], selectedPartId: null });
+      set({ pendingPreset: preset, draggingPart: null, selectedIds: [], selectedPartId: null,
+        navMode: 'none', paintColor: null, pickSameActive: false });
     } else {
       set({ pendingPreset: null });
     }
   },
   
-  addPresetGroup: (preset, dropPos) => {
+  addPresetGroup: (preset, dropPos, merge) => {
     const state = get();
+    if (!preset.parts.length) return;
+    state._pushHistory();
     const newParts: PlacedPart[] = preset.parts.map((p) => ({
       ...p,
       id: uuidv4(),
@@ -1195,29 +1109,42 @@ export const useStore = create<StoreState>((set, get) => ({
       ] as [number, number, number],
     }));
     const ids = newParts.map((p) => p.id);
+    const placedId = new Map(preset.parts.map((part, index) => [part.id, ids[index]]));
+    const subgroups = (preset.subgroups ?? []).map((group): SceneGroup => ({
+      id: newGroupId(),
+      name: group.name,
+      memberIds: group.memberIds.map(id => placedId.get(id)!).filter(Boolean),
+      childGroupIds: [],
+    })).filter(group => group.memberIds.length > 0);
+    const subgroupMembers = new Set(subgroups.flatMap(group => group.memberIds));
+    const joinedGroups = new Set((merge?.sharedIds ?? []).flatMap(id => {
+      const group = getTopGroupOf(state.groups, id);
+      return group ? [group.id] : [];
+    }));
+    const looseShared = (merge?.sharedIds ?? []).filter(id => !getTopGroupOf(state.groups, id));
+    const replacements = new Map(merge?.replacements.map(part => [part.id, part]));
+    const group: SceneGroup = {
+      id: newGroupId(),
+      name: preset.name,
+      memberIds: [...ids.filter(id => !subgroupMembers.has(id)), ...looseShared],
+      childGroupIds: [...subgroups.map(child => child.id), ...joinedGroups],
+    };
+    const groups = [...state.groups, ...subgroups, group];
     set({
-      parts: [...state.parts, ...newParts],
+      parts: [...state.parts.map(part => replacements.get(part.id) ?? part), ...newParts],
+      groups,
       pendingPreset: null,
-      selectedIds: ids,
+      selectedIds: collectGroupPartIds(groups, group.id),
       selectedPartId: ids[0],
     });
-    // 成组：把整个模块作为一个组
-    get().toggleGroup();
-    // 命名组
-    const s2 = get();
-    const top = getTopGroupOf(s2.groups, ids[0]);
-    if (top) {
-      set({ groups: s2.groups.map((g) => (g.id === top.id ? { ...g, name: preset.name } : g)) });
-    }
   },
   
   setGhostPosition: (pos: [number, number, number] | null) => {
-    const state = get();
     if (!pos) {
       set({ ghostPosition: null });
       return;
     }
-    const snappedPos = state.snapEnabled ? snapPosition(pos) : pos;
+    const snappedPos = snapPosition(pos);
     set({ ghostPosition: snappedPos });
   },
   
@@ -1298,12 +1225,13 @@ export const useStore = create<StoreState>((set, get) => ({
     if (history.past.length === 0) return;
     
     const prev = history.past.pop()!;
-    history.future.unshift(JSON.parse(JSON.stringify(state.parts)));
+    history.future.unshift(JSON.parse(JSON.stringify({ parts: state.parts, groups: state.groups })));
     set({
-      parts: prev,
+      ...prev,
       canUndo: history.past.length > 0,
       canRedo: true,
       selectedPartId: null,
+      selectedIds: [],
     });
   },
   
@@ -1313,12 +1241,13 @@ export const useStore = create<StoreState>((set, get) => ({
     if (history.future.length === 0) return;
     
     const next = history.future.shift()!;
-    history.past.push(JSON.parse(JSON.stringify(state.parts)));
+    history.past.push(JSON.parse(JSON.stringify({ parts: state.parts, groups: state.groups })));
     set({
-      parts: next,
+      ...next,
       canUndo: true,
       canRedo: history.future.length > 0,
       selectedPartId: null,
+      selectedIds: [],
     });
   },
   
@@ -1697,71 +1626,61 @@ export const useStore = create<StoreState>((set, get) => ({
   },
   
   // ====== 版本对比 ======
-  startCompare: (projectId: string) => {
+  startCompare: (beforeId, afterId) => {
+    if (beforeId === afterId) return;
     const state = get();
-    const oldProject = state.projects.find((p) => p.id === projectId);
-    const currentProject = state.getCurrentProject();
-    if (!oldProject || !currentProject) return;
+    const before = state.projects.find(project => project.id === beforeId);
+    const after = state.projects.find(project => project.id === afterId);
+    if (!before || !after) return;
     
-    const diff = state.computeDiff(oldProject, currentProject);
     set({
       viewMode: 'diff',
-      diffProjectId: projectId,
-      diffResult: diff,
+      diffResult: state.computeDiff(before, after),
     });
   },
   
   exitCompare: () => {
     set({
       viewMode: 'normal',
-      diffProjectId: null,
       diffResult: null,
     });
   },
   
   computeDiff: (oldProject: DesignProject, newProject: DesignProject): DesignDiff => {
-    // 按配件类型统计数量
-    const oldCount = new Map<string, number>();
-    const newCount = new Map<string, number>();
-    
-    oldProject.parts.forEach((p) => {
-      oldCount.set(p.partId, (oldCount.get(p.partId) || 0) + 1);
-    });
-    newProject.parts.forEach((p) => {
-      newCount.set(p.partId, (newCount.get(p.partId) || 0) + 1);
-    });
-    
-    const allPartIds = new Set([...oldCount.keys(), ...newCount.keys()]);
+    const counts = new Map<string, { oldCount: number; newCount: number; colors: Map<string, PartDiffItem['colors'][number]> }>();
+    const countParts = (parts: PlacedPart[], side: 'oldCount' | 'newCount') => {
+      for (const { partId, colorId } of parts) {
+        const entry = counts.get(partId) ?? { oldCount: 0, newCount: 0, colors: new Map() };
+        const color = entry.colors.get(colorId) ?? { colorId, oldCount: 0, newCount: 0 };
+        entry[side]++;
+        color[side]++;
+        entry.colors.set(colorId, color);
+        counts.set(partId, entry);
+      }
+    };
+    countParts(oldProject.parts, 'oldCount');
+    countParts(newProject.parts, 'newCount');
     
     const addedParts: PartDiffItem[] = [];
     const removedParts: PartDiffItem[] = [];
     const changedParts: PartDiffItem[] = [];
     
-    allPartIds.forEach((partId) => {
-      const oldNum = oldCount.get(partId) || 0;
-      const newNum = newCount.get(partId) || 0;
-      const change = newNum - oldNum;
-      
+    for (const [partId, { oldCount, newCount, colors }] of counts) {
+      const colorChanges = [...colors.values()].filter(color => color.oldCount !== color.newCount);
+      if (colorChanges.length === 0) continue;
       const def = getPartById(partId);
-      const partName = def?.name || partId;
-      const category = (def?.category || 'bar') as PartCategory;
-      
-      if (oldNum === 0 && newNum > 0) {
-        addedParts.push({ partId, partName, category, oldCount: oldNum, newCount: newNum, change, type: 'added' });
-      } else if (oldNum > 0 && newNum === 0) {
-        removedParts.push({ partId, partName, category, oldCount: oldNum, newCount: newNum, change, type: 'removed' });
-      } else if (change !== 0) {
-        changedParts.push({ partId, partName, category, oldCount: oldNum, newCount: newNum, change, type: 'changed' });
-      }
-    });
+      const type = oldCount === 0 ? 'added' : newCount === 0 ? 'removed' : 'changed';
+      const list = type === 'added' ? addedParts : type === 'removed' ? removedParts : changedParts;
+      list.push({ partId, partName: def?.name ?? partId, category: def?.category ?? 'bar',
+        oldCount, newCount, change: newCount - oldCount, colors: colorChanges, type });
+    }
     
     return {
+      beforeName: oldProject.name,
+      afterName: newProject.name,
       addedParts,
       removedParts,
       changedParts,
-      totalAdded: addedParts.reduce((s, p) => s + p.change, 0),
-      totalRemoved: removedParts.reduce((s, p) => s + Math.abs(p.change), 0),
-      totalChanged: changedParts.length,
     };
   },
   
@@ -1801,6 +1720,7 @@ export const useStore = create<StoreState>((set, get) => ({
         position: p.position,
         rotation: p.rotation,
         color: p.colorId,
+        roofOutline: p.roofOutline,
       })),
       summary: state.getPartsSummary(),
     };

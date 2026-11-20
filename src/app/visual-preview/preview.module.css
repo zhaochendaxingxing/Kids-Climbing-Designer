@@ -701,10 +701,12 @@
 }
 .swatches {
   display: flex;
-  gap: 14px;
+  flex-wrap: wrap;
+  gap: 8px 14px;
   margin-top: 15px;
 }
 .swatches button {
+  flex: none;
   width: 25px;
   height: 25px;
   border: 1px solid var(--line);

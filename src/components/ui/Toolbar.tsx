@@ -13,7 +13,6 @@ import {
   VerticalAlignTopOutlined,
   BgColorsOutlined,
   BorderOutlined,
-  AimOutlined,
 } from '@ant-design/icons';
 import { useStore } from '@/store/useStore';
 import { PART_COLORS } from '@/data/parts';
@@ -34,7 +33,6 @@ export function Toolbar({ onSave, onLoad }: ToolbarProps) {
   const removeSelected = useStore((state) => state.removeSelected);
   const updatePartColor = useStore((state) => state.updatePartColor);
   const gridVisible = useStore((state) => state.gridVisible);
-  const snapEnabled = useStore((state) => state.snapEnabled);
   const parts = useStore((state) => state.parts);
   const viewMode = useStore((state) => state.viewMode);
   
@@ -74,9 +72,6 @@ export function Toolbar({ onSave, onLoad }: ToolbarProps) {
     useStore.setState({ gridVisible: !gridVisible });
   };
   
-  const toggleSnap = () => {
-    useStore.setState({ snapEnabled: !snapEnabled });
-  };
   
   return (
     <div className="h-12 bg-white border-b border-gray-200 flex items-center px-4 gap-1 shrink-0">
@@ -228,15 +223,6 @@ export function Toolbar({ onSave, onLoad }: ToolbarProps) {
           onClick={toggleGrid}
           size="small"
           ghost={gridVisible}
-        />
-      </Tooltip>
-      <Tooltip title={snapEnabled ? '关闭吸附' : '开启吸附'}>
-        <Button
-          type={snapEnabled ? 'primary' : 'text'}
-          icon={<AimOutlined />}
-          onClick={toggleSnap}
-          size="small"
-          ghost={snapEnabled}
         />
       </Tooltip>
     </div>

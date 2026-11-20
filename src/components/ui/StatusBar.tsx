@@ -7,7 +7,6 @@ export function StatusBar() {
   const selectedPartId = useStore((state) => state.selectedPartId);
   const hoveredPartId = useStore((state) => state.hoveredPartId);
   const draggingPart = useStore((state) => state.draggingPart);
-  const snapEnabled = useStore((state) => state.snapEnabled);
   const gridVisible = useStore((state) => state.gridVisible);
   const viewMode = useStore((state) => state.viewMode);
   
@@ -66,7 +65,6 @@ export function StatusBar() {
       {/* 右侧：统计信息 */}
       <div className="flex items-center gap-4">
         <span>网格: {gridVisible ? '开' : '关'}</span>
-        <span>吸附: {snapEnabled ? '开' : '关'}</span>
         <span className="text-gray-400">|</span>
         <span>配件: <span className="font-medium text-gray-700">{parts.length}</span> 件</span>
         <span className="text-gray-400">|</span>

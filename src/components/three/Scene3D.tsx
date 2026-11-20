@@ -1,12 +1,23 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback } from 'react';
+import { message, Popover } from 'antd';
+import { FlipHorizontal2, RotateCw } from 'lucide-react';
 import * as THREE from 'three';
+import PartThumbnail from './PartThumbnail';
+import { createPartMesh } from './partMesh';
+import { mirrorPlatformTransform } from './platformMirror';
+import { findRoofPanelFit, type RoofPanelFit } from './roofPanelFit';
+import { findTrampolineFit } from './trampolineFit';
+import { findSlideFit, placeAssemblyParts } from './slideFit';
+import { findLadderJoin } from './ladderFit';
+import { findBridgeFit } from './bridgeFit';
+import { findMountedAccessoryFit, findTallRainbowFit } from './specialAccessoryFit';
+import { fitRoofCombo, endpointConnector, bodyIntersects, orientRoofCombo, ports } from '@/lib/construction';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { useStore, collectGroupPartIds, getTopGroupOf } from '@/store/useStore';
 import { PlacedPart, PartDefinition, SceneGroup } from '@/types/parts';
-import { PART_COLORS, CONNECTOR_COLORS, PARTS_LIBRARY, getPartById, COMBO_45L, NEST_SOCKET_OUTER_DIAMETER, NEST_SOCKET_INNER_DIAMETER, NEST_SOCKET_LENGTH } from '@/data/parts';
+import { PART_COLORS, CONNECTOR_COLORS, PARTS_LIBRARY, getPartById, getPartColor, COMBO_45L, PLATE_THICKNESS } from '@/data/parts';
 
 type DesignerState = ReturnType<typeof useStore.getState>;
 
@@ -19,7 +30,6 @@ interface SceneContextMenu {
 interface SceneRuntime {
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
-  renderer: THREE.WebGLRenderer;
   controls: OrbitControls;
   ground: THREE.Mesh;
   gridHelper: THREE.GridHelper;
@@ -43,682 +53,7 @@ const SNAP_DIST = 10;
 const SNAP_CONNECT_DIST = 6;     // 连接吸附距离
 const SNAP_ANGLE_DEG = 15;       // 方向允许偏差（度）
 const SNAP_PLATFORM_DIST = 8;    // 平台吸附距离
-
-// 创建中空圆管几何体（杆件） — 使用 LatheGeometry 生成管壁，两端可见
-function createBarTubeGeometry(length: number, outerR: number, innerR: number): THREE.BufferGeometry {
-  const points: THREE.Vector2[] = [];
-  const segments = 24;
-  // 外轮廓（从左下到左上，顺时针）
-  points.push(new THREE.Vector2(outerR, -length / 2));
-  points.push(new THREE.Vector2(outerR, length / 2));
-  // 顶面（外→内）
-  points.push(new THREE.Vector2(innerR, length / 2));
-  // 内壁
-  points.push(new THREE.Vector2(innerR, -length / 2));
-  // 底面（内→外闭合）
-  const geo = new THREE.LatheGeometry(points, segments);
-  geo.rotateZ(Math.PI / 2); // 轴线沿 X 轴（默认 Lathe 沿 Y 轴旋转）
-  return geo;
-}
-
-// 创建平台板几何体（平板 + 四周折边）
-function createPlatformGeometry(spec: {
-  plateWidth: number;
-  plateDepth: number;
-  plateThickness: number;
-  rimHeight: number;
-  rimThickness: number;
-}): THREE.BufferGeometry {
-  const { plateWidth, plateDepth, plateThickness, rimHeight, rimThickness } = spec;
-  const plateGeo = new THREE.BoxGeometry(plateWidth, plateThickness, plateDepth);
-
-  // 折边使用四个 Box，通过 mergeGeometries 合并
-  // 折边中点 Y（板下方向下突出）。
-  // 额外下移 0.01cm，避免折边顶面与板底（y=-thickness/2）共面产生 Z-fighting ，
-  // 否则顶面视角会出现深灰色直角三角形网格线
-  const rimTopY = -plateThickness / 2 - rimHeight / 2 - 0.01;
-  const frontRim = new THREE.BoxGeometry(plateWidth - rimThickness * 2, rimHeight, rimThickness);
-  frontRim.translate(0, rimTopY, -plateDepth / 2 + rimThickness / 2);
-  const backRim = new THREE.BoxGeometry(plateWidth - rimThickness * 2, rimHeight, rimThickness);
-  backRim.translate(0, rimTopY, plateDepth / 2 - rimThickness / 2);
-  const leftRim = new THREE.BoxGeometry(rimThickness, rimHeight, plateDepth);
-  leftRim.translate(-plateWidth / 2 + rimThickness / 2, rimTopY, 0);
-  const rightRim = new THREE.BoxGeometry(rimThickness, rimHeight, plateDepth);
-  rightRim.translate(plateWidth / 2 - rimThickness / 2, rimTopY, 0);
-
-  // 合并几何体
-  const merged = mergeGeometries([plateGeo, frontRim, backRim, leftRim, rightRim]);
-  return merged;
-}
-
-// 生成布艺编织纹理（CanvasTexture）：用于布兜等软质配件的表面，区别于平滑硬质板材
-function createFabricTexture(): THREE.CanvasTexture {
-  const size = 128;
-  const canvas = document.createElement('canvas');
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext('2d')!;
-  // 底色
-  ctx.fillStyle = '#b0b0a8';
-  ctx.fillRect(0, 0, size, size);
-  const cell = 12; // 每格纱线宽度
-  // 经纬纱线明暗交错（平纹编织）
-  for (let y = 0; y < size; y += cell) {
-    for (let x = 0; x < size; x += cell) {
-      const dark = ((x / cell) + (y / cell)) % 2 === 0;
-      ctx.fillStyle = dark ? '#c4c4bb' : '#94948b';
-      ctx.fillRect(x, y, cell, cell);
-    }
-  }
-  // 纬向纱线细纹（水平）
-  ctx.strokeStyle = '#808078';
-  ctx.lineWidth = 1;
-  for (let y = 0; y <= size; y += cell / 2) {
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(size, y);
-    ctx.stroke();
-  }
-  // 经向纱线细纹（垂直）
-  ctx.strokeStyle = '#9a9a91';
-  for (let x = 0; x <= size; x += cell / 2) {
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, size);
-    ctx.stroke();
-  }
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.needsUpdate = true;
-  return tex;
-}
-
-// 生成带「四角内凹切角」的水平平板几何（板面 XZ、厚沿 Y），支持真正镂空孔（圆形 / 正六边形）。
-// holes 坐标用世界系：x=宽方向、z=深方向、type='circle'|'hex'、r=半径(cm)。
-function createCutCornerPanelGeometry(
-  w: number,
-  d: number,
-  thickness: number,
-  cornerCut: number,
-  holes: { x: number; z: number; type: 'circle' | 'hex'; r: number }[]
-): THREE.BufferGeometry {
-  const hw = w / 2;
-  const hd = d / 2;
-  const cc = cornerCut;
-  const shape = new THREE.Shape();
-  // 外轮廓：方形四角切掉 45° 等腰直角三角形（内凹切角）
-  shape.moveTo(-hw + cc, -hd);
-  shape.lineTo(hw - cc, -hd);
-  shape.lineTo(hw, -hd + cc);
-  shape.lineTo(hw, hd - cc);
-  shape.lineTo(hw - cc, hd);
-  shape.lineTo(-hw + cc, hd);
-  shape.lineTo(-hw, hd - cc);
-  shape.lineTo(-hw, -hd + cc);
-  shape.closePath();
-
-  const makeHolePath = (x: number, z: number, type: 'circle' | 'hex', r: number) => {
-    const hole = new THREE.Path();
-    const seg = type === 'circle' ? 40 : 6;
-    const base = type === 'circle' ? 0 : Math.PI / 6;
-    for (let i = 0; i <= seg; i++) {
-      const a = base + (i / seg) * Math.PI * 2;
-      const px = x + Math.cos(a) * r;
-      const py = -z + Math.sin(a) * r;
-      if (i === 0) hole.moveTo(px, py);
-      else hole.lineTo(px, py);
-    }
-    return hole;
-  };
-
-  for (const h of holes) {
-    shape.holes.push(makeHolePath(h.x, h.z, h.type, h.r));
-  }
-
-  const geo = new THREE.ExtrudeGeometry(shape, { depth: thickness, bevelEnabled: false });
-  geo.rotateX(-Math.PI / 2);
-  geo.translate(0, -thickness / 2, 0);
-  return geo;
-}
-
-// 扩展配件专属渲染（扩展杆件 / 扩展板件）
-// 每种 extKind 用简单的 THREE 基元拼出可辨认造型；mat 为已配色的标准材质
-function buildExtensionMesh(
-  group: THREE.Group,
-  def: PartDefinition,
-  mat: THREE.MeshStandardMaterial,
-  createPlatformGeometry: (spec: NonNullable<PartDefinition['platformSpec']>) => THREE.BufferGeometry
-): void {
-  const spec = def.platformSpec;
-  const ext = def.extKind ?? '';
-  const darkMat = new THREE.MeshStandardMaterial({
-    color: '#444444',
-    roughness: 0.7,
-    metalness: 0.1,
-    side: THREE.DoubleSide,
-  });
-  const redMat = new THREE.MeshStandardMaterial({
-    color: '#EE5A5A',
-    roughness: 0.5,
-    side: THREE.DoubleSide,
-  });
-
-  const addMesh = (geo: THREE.BufferGeometry, m: THREE.Material, x = 0, y = 0, z = 0, scaleY = 1) => {
-    const mesh = new THREE.Mesh(geo, m);
-    mesh.position.set(x, y, z);
-    mesh.scale.set(1, scaleY, 1);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    group.add(mesh);
-  };
-
-  // 1) 扩展杆件：35CM 圆管 + 亮黄三辐方向盘（固定于管身中部上方）
-  if (ext === 'wheelbar') {
-    const tubeGeo = createBarTubeGeometry(35, 4.4 / 2, 4.0 / 2);
-    addMesh(tubeGeo, mat, 0, 0, 0);
-    // 方向盘：圆环（轮胎）+ 三辐条 + 中心毂
-    const wheelMat = new THREE.MeshStandardMaterial({ color: '#F7CA45', roughness: 0.4, side: THREE.DoubleSide });
-    const rimGeo = new THREE.TorusGeometry(5, 0.9, 12, 32);
-    const rim = new THREE.Mesh(rimGeo, wheelMat);
-    rim.position.set(0, 8.5, 0);
-    rim.rotation.set(Math.PI / 2, 0, 0);
-    rim.castShadow = true;
-    group.add(rim);
-    // 中心毂
-    addMesh(new THREE.CylinderGeometry(0.8, 0.8, 1.4, 16), wheelMat, 0, 8.5, 0, 0);
-    // 三辐条（Y 方向在环面内均布）：辐条沿竖直平面内的三条径向方向
-    for (let i = 0; i < 3; i++) {
-      const spoke = new THREE.Mesh(new THREE.BoxGeometry(0.6, 4.2, 0.6), wheelMat);
-      spoke.position.set(0, 8.5, 0);
-      spoke.rotation.z = (i * Math.PI * 2) / 3;
-      const tmp = new THREE.Mesh(new THREE.BoxGeometry(0.6, 4.2, 0.6), wheelMat);
-      tmp.position.set(0, 2.1, 0);
-      tmp.updateMatrix();
-      spoke.add(tmp);
-      spoke.updateMatrixWorld();
-      group.add(spoke);
-    }
-    return;
-  }
-
-  // 2) 扩展板件（按 extKind 分型）
-  if (!spec) return;
-
-  const dims = {
-    w: def.size.width,
-    d: def.size.depth,
-  };
-
-  if (ext === 'glass') {
-    // PC 玻璃栈道：透明板 + 白色金属边框
-    const glassMat = new THREE.MeshStandardMaterial({
-      color: '#cfeeff',
-      transparent: true,
-      opacity: 0.35,
-      roughness: 0.05,
-      metalness: 0.4,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-    });
-    addMesh(new THREE.BoxGeometry(dims.w - 1, 0.5, dims.d - 1), glassMat, 0, 1.2, 0);
-    // 边框条
-    const frameMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.5 });
-    const fw = dims.w / 2 - 0.2, fd = dims.d / 2 - 0.2;
-    addMesh(new THREE.BoxGeometry(dims.w, 1.2, 0.6), frameMat, 0, 0.8, -fd);
-    addMesh(new THREE.BoxGeometry(dims.w, 1.2, 0.6), frameMat, 0, 0.8, fd);
-    addMesh(new THREE.BoxGeometry(0.6, 1.2, dims.d), frameMat, -fw, 0.8, 0);
-    addMesh(new THREE.BoxGeometry(0.6, 1.2, dims.d), frameMat, fw, 0.8, 0);
-    return;
-  }
-  if (ext === 'pouch') {
-    // 布兜：方形悬挂兜袋。顶部开口（四角绳扣挂在框架顶部4根圆管上），主体从开口向下沉入框架内部
-    // 本地坐标：兜口绳索环位于 y≈0 附近（贴合框架顶面），兜壁/兜底向下延伸到 -depth
-    // 布料材质：编织纹理 map + bumpMap，粗糙度高、无金属感，与平滑硬质板材形成区分
-    const fabricTex = createFabricTexture();
-    fabricTex.repeat.set(4, 4);
-    const pouchMat = new THREE.MeshStandardMaterial({
-      color: mat.color,
-      roughness: 0.85,
-      metalness: 0,
-      map: fabricTex,
-      bumpMap: fabricTex,
-      bumpScale: 0.5,
-      side: THREE.DoubleSide,
-    });
-    const half = dims.w / 2;
-    const depth = 25; // 兜深：约 25cm，主体从顶部圆管口下沉、不到框架底
-    // 兜底（y = -depth）
-    addMesh(new THREE.BoxGeometry(dims.w - 0.6, 0.5, dims.d - 0.6), pouchMat, 0, -depth, 0);
-    // 四面侧壁：从兜口(y≈0)向下至兜底(-depth)
-    addMesh(new THREE.BoxGeometry(dims.w, depth, 0.5), pouchMat, 0, -depth / 2, -half);
-    addMesh(new THREE.BoxGeometry(dims.w, depth, 0.5), pouchMat, 0, -depth / 2, half);
-    addMesh(new THREE.BoxGeometry(0.5, depth, dims.d), pouchMat, -half, -depth / 2, 0);
-    addMesh(new THREE.BoxGeometry(0.5, depth, dims.d), pouchMat, half, -depth / 2, 0);
-    // 兜口翻边（略高于兜口，形成开口边缘）
-    addMesh(new THREE.BoxGeometry(dims.w, 1.2, 0.4), pouchMat, 0, 0.4, -half);
-    addMesh(new THREE.BoxGeometry(dims.w, 1.2, 0.4), pouchMat, 0, 0.4, half);
-    addMesh(new THREE.BoxGeometry(0.4, 1.2, dims.d), pouchMat, -half, 0.4, 0);
-    addMesh(new THREE.BoxGeometry(0.4, 1.2, dims.d), pouchMat, half, 0.4, 0);
-    // 顶部四角绳扣（挂在框架顶部4根圆管上）
-    const cueMat = new THREE.MeshStandardMaterial({ color: '#888888', roughness: 0.8 });
-    const corners: [number, number, number][] = [[-half, 0, -half], [-half, 0, half], [half, 0, -half], [half, 0, half]];
-    for (const c of corners) addMesh(new THREE.TorusGeometry(1.0, 0.35, 8, 16), cueMat, c[0], c[1], c[2]);
-    return;
-  }
-  if (ext === 'rainbow') {
-    // 彩虹门：多彩竖条织带扉
-    const w = dims.w;
-    const colors = ['#FF5A5A', '#F7CA45', '#26C281', '#4A90D9', '#B19CD9'];
-    const stripeW = 4;
-    const count = Math.floor(w / stripeW);
-    for (let i = 0; i < count; i++) {
-      const c = colors[i % colors.length];
-      const sm = new THREE.MeshStandardMaterial({ color: c, roughness: 0.6, side: THREE.DoubleSide });
-      addMesh(new THREE.BoxGeometry(stripeW - 0.2, 40, 0.4), sm, -w / 2 + stripeW / 2 + i * stripeW, 20, 0);
-    }
-    return;
-  }
-  if (ext === 'honeycomb') {
-    // 蜂巢板：白色底板（四角内凹切角）布满正六边形镂空（蜂巢状网格）。
-    // 六边形单元按标准密铺定位（pointy-top）：同列孔距 = √3·R、斜向行距 = 1.5·R、交错半列。
-    // 关键：开孔半径必须小于单元外接圆半径 R（保留约 1cm 蜂窝壁），
-    // 否则相邻孔洞会相切/相交，导致 ExtrudeGeometry 对 Shape 三角化失败，
-    // 表现为乱三角、孔洞未正确镂空（仅部分孔通透）。
-    const hexR = 2.2; // 六边形单元外接圆半径
-    const holeR = hexR * 0.72; // 开孔半径（<R，预留蜂窝壁）
-    const colSpacing = hexR * Math.sqrt(3); // 相邻列中心水平间距
-    const rowSpacing = hexR * 1.5; // 相邻行中心纵向间距
-    const margin = 3.2;
-    const cols = Math.max(1, Math.floor((dims.w - margin * 2) / (hexR * Math.sqrt(3))));
-    const rows = Math.max(1, Math.floor((dims.d - margin * 2) / rowSpacing));
-    const startX = -((cols - 1) * colSpacing) / 2;
-    const startZ = -((rows - 1) * rowSpacing) / 2;
-    const holes: { x: number; z: number; type: 'circle' | 'hex'; r: number }[] = [];
-    for (let r = 0; r < rows; r++) {
-      const off = r % 2 === 0 ? 0 : colSpacing / 2;
-      for (let c = 0; c < cols; c++) {
-        const x = startX + c * colSpacing + off;
-        if (Math.abs(x) > dims.w / 2 - margin) continue;
-        holes.push({ x, z: startZ + r * rowSpacing, type: 'hex', r: holeR });
-      }
-    }
-    const geo = createCutCornerPanelGeometry(dims.w, dims.d, 0.7, 5, holes);
-    addMesh(geo, mat, 0, 0, 0);
-    return;
-  }
-  if (ext === 'brick') {
-    // 积木板：底板 + 众多圆凸粒
-    addMesh(new THREE.BoxGeometry(dims.w, 0.8, dims.d), mat, 0, 0.2, 0);
-    const studs = 8;
-    const gap = dims.w / studs;
-    for (let i = 0; i < studs; i++) {
-      for (let j = 0; j < studs; j++) {
-        addMesh(
-          new THREE.CylinderGeometry(0.45, 0.45, 1, 12),
-          mat,
-          -dims.w / 2 + gap / 2 + i * gap,
-          1.2,
-          -dims.d / 2 + gap / 2 + j * gap
-        );
-      }
-    }
-    return;
-  }
-  if (ext === 'ninehole') {
-    // 九洞板：浅蓝底板（四角内凹切角）3×3 均匀布置 9 个直径 7cm 的圆形镂空通孔
-    const spacing = Math.min(dims.w, dims.d) / 3;
-    const posVals = [-spacing, 0, spacing];
-    const holes: { x: number; z: number; type: 'circle' | 'hex'; r: number }[] = [];
-    for (const ix of posVals) {
-      for (const iz of posVals) {
-        holes.push({ x: ix, z: iz, type: 'circle', r: 3.5 });
-      }
-    }
-    const geo = createCutCornerPanelGeometry(dims.w, dims.d, 0.9, 5, holes);
-    addMesh(geo, mat, 0, 0, 0);
-    return;
-  }
-  if (ext === 'basketball') {
-    // 篮球板：方形竖立篮板（四角内凹切角）＋ 板面中心水平向前伸出的白色篮筐 ＋ 白黄相间下垂篮网。
-    // 本地坐标约定（挂装为立面板时）：local X = 板宽、local Y = 板厚/前伸方向、local Z = 竖直方向。
-    const bw = spec.plateWidth; // 篮板宽（40）
-    const bd = spec.plateDepth; // 篮板高（40，立放后）
-    const boardGeo = createCutCornerPanelGeometry(bw, bd, 0.9, 5, []);
-    addMesh(boardGeo, mat, 0, 0, 0);
-
-    const whiteMat = new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.3, metalness: 0.6 });
-    const hoopR = 8.6; // 篮筐半径（较原先 4.2 扩大一倍以上）
-    const protrude = 15; // 篮筐相对板面前伸距离（local Y）
-    // 白色安装板（贴合篮板正面，居中）
-    addMesh(new THREE.BoxGeometry(16, 0.6, 16), whiteMat, 0, 0.7, 0);
-    // 连接臂（从安装板向前伸出，托起篮筐）
-    addMesh(new THREE.BoxGeometry(4.5, protrude - 1, 4.5), whiteMat, 0, (protrude + 1) / 2, 0);
-    // 篮筐：水平圆环（local XY 平面 → 挂装后即水平朝上、向前伸出）
-    addMesh(new THREE.TorusGeometry(hoopR, 0.5, 12, 40), whiteMat, 0, protrude, 0);
-
-    // 篮网：白黄相间，从篮筐圆环向下垂挂（挂装后“下”= local -Z）
-    const netWhiteMat = new THREE.MeshStandardMaterial({ color: '#f7f7f2', transparent: true, opacity: 0.78, wireframe: true, side: THREE.DoubleSide });
-    const netYellowMat = new THREE.MeshStandardMaterial({ color: '#F7CA45', transparent: true, opacity: 0.78, wireframe: true, side: THREE.DoubleSide });
-    const addNet = (topR: number, botR: number, len: number, m: THREE.Material, zc: number) => {
-      const g = new THREE.CylinderGeometry(topR, botR, len, 16, 2);
-      g.rotateX(Math.PI / 2); // 轴由 Y 对齐到 local Z（竖直向下）
-      const mesh = new THREE.Mesh(g, m);
-      mesh.position.set(0, protrude, zc);
-      mesh.castShadow = true;
-      group.add(mesh);
-    };
-    addNet(hoopR, hoopR * 0.82, 5.5, netWhiteMat, -2.75);
-    addNet(hoopR * 0.82, hoopR * 0.5, 5, netYellowMat, -8);
-    return;
-  }
-  if (ext === 'maze') {
-    // 迷宫板：红色外框 + 原木操作面板 + 卡通装饰（太阳/绿叶/小虫）+ 彩色滑珠 + 运算滑块
-    const woodMat = new THREE.MeshStandardMaterial({ color: '#d9b38c', roughness: 0.6, side: THREE.DoubleSide });
-    addMesh(new THREE.BoxGeometry(dims.w, 0.8, dims.d), woodMat, 0, 0.15, 0);
-    // 红色外框
-    const half = dims.w / 2;
-    addMesh(new THREE.BoxGeometry(dims.w, 1.4, 0.6), redMat, 0, 0.6, -half);
-    addMesh(new THREE.BoxGeometry(dims.w, 1.4, 0.6), redMat, 0, 0.6, half);
-    addMesh(new THREE.BoxGeometry(0.6, 1.4, dims.d), redMat, -half, 0.6, 0);
-    addMesh(new THREE.BoxGeometry(0.6, 1.4, dims.d), redMat, half, 0.6, 0);
-    // 顶部彩色滑珠滑槽（横梁）
-    addMesh(new THREE.BoxGeometry(dims.w - 8, 0.5, 0.8), new THREE.MeshStandardMaterial({ color: '#c8a87a' }), 0, 1.05, -half + 6);
-    // 彩色滑珠（红/黄/蓝/绿沿槽分布）
-    const beadColors = ['#EE5A5A', '#F7CA45', '#4A90D9', '#26C281'];
-    for (let i = 0; i < 4; i++) {
-      const bm = new THREE.MeshStandardMaterial({ color: beadColors[i], roughness: 0.3 });
-      addMesh(new THREE.CylinderGeometry(0.9, 0.9, 0.7, 14), bm, -10 + i * 6.6, 1.45, -half + 6);
-    }
-    // 两枚运算符号滑块（带数字/符号的小方块）
-    addMesh(new THREE.BoxGeometry(2.2, 0.6, 2.2), new THREE.MeshStandardMaterial({ color: '#ffffff', roughness: 0.4 }), -6, 1.0, 4);
-    addMesh(new THREE.BoxGeometry(2.2, 0.6, 2.2), new THREE.MeshStandardMaterial({ color: '#F7CA45', roughness: 0.4 }), 5, 1.0, -5);
-    // 卡通太阳（左上 + 四向光芒）
-    const sunMat = new THREE.MeshStandardMaterial({ color: '#F7CA45', roughness: 0.4 });
-    addMesh(new THREE.CylinderGeometry(1.4, 1.4, 0.5, 18), sunMat, -half + 4, 1.2, half - 4);
-    for (let s = 0; s < 4; s++) {
-      const a = (s * Math.PI) / 2;
-      addMesh(new THREE.BoxGeometry(0.5, 0.3, 1.6), sunMat, -half + 4 + Math.cos(a) * 2.2, 1.2, half - 4 + Math.sin(a) * 2.2);
-    }
-    // 两片绿叶
-    const leafMat = new THREE.MeshStandardMaterial({ color: '#26C281', roughness: 0.5, side: THREE.DoubleSide });
-    addMesh(new THREE.BoxGeometry(1.6, 0.25, 0.9), leafMat, 9, 1.0, 10);
-    addMesh(new THREE.BoxGeometry(1.6, 0.25, 0.9), leafMat, 12, 1.0, 8);
-    // 卡通小虫（红色半球 + 黑点）
-    addMesh(new THREE.CylinderGeometry(1.1, 1.5, 0.8, 16), redMat, -12, 0.85, -10);
-    addMesh(new THREE.CylinderGeometry(0.25, 0.25, 0.4, 8), darkMat, -12, 1.3, -11.4);
-    return;
-  }
-  if (ext === 'ropenet') {
-    // 爬网：灰白双色绳线编织的方格网（水平网格，绳结固定于四边）
-    const grayMat = new THREE.MeshStandardMaterial({ color: '#9a9a9a', roughness: 0.85, side: THREE.DoubleSide });
-    const whiteMat = new THREE.MeshStandardMaterial({ color: '#f5f5f0', roughness: 0.75, side: THREE.DoubleSide });
-    const n = 8;
-    const gap = dims.w / n;
-    const ropeR = 0.22;
-    const addRope = (length: number, m: THREE.Material, x: number, y: number, z: number, alongX: boolean) => {
-      const mesh = new THREE.Mesh(new THREE.CylinderGeometry(ropeR, ropeR, length, 8), m);
-      mesh.position.set(x, y, z);
-      if (alongX) mesh.rotation.z = Math.PI / 2; // 沿 Y → 沿 X（横向绳）
-      else mesh.rotation.x = Math.PI / 2; // 沿 Y → 沿 Z（纵向绳）
-      mesh.castShadow = true;
-      group.add(mesh);
-    };
-    // 横向绳（沿 X，分布于 Z 方向，灰白交替）
-    for (let i = 0; i <= n; i++) {
-      const z = -dims.d / 2 + i * gap;
-      addRope(dims.w, i % 2 === 0 ? grayMat : whiteMat, 0, 0, z, true);
-    }
-    // 纵向绳（沿 Z，分布于 X 方向，白灰交替）
-    for (let i = 0; i <= n; i++) {
-      const x = -dims.w / 2 + i * gap;
-      addRope(dims.d, i % 2 === 0 ? whiteMat : grayMat, x, 0, 0, false);
-    }
-    return;
-  }
-  if (ext === 'rockbig' || ext === 'rockmid' || ext === 'rocksmall') {
-    // 攀岩板：黄色板 + 攀岩点（红/蓝半球凸点）
-    addMesh(new THREE.BoxGeometry(dims.w, 0.8, dims.d), mat, 0, 0.2, 0);
-    // 大板两只点（红/蓝），中板两只，小板一只
-    const points: [number, number, string][] =
-      ext === 'rocksmall'
-        ? [[-5, 0, '#EE5A5A']]
-        : ext === 'rockmid'
-          ? [[-6, 5, '#EE5A5A'], [6, -5, '#4A90D9']]
-          : [[-7, 6, '#EE5A5A'], [7, -6, '#4A90D9']];
-    for (const [px, pz, pc] of points) {
-      const holdMat = new THREE.MeshStandardMaterial({ color: pc, roughness: 0.5, side: THREE.DoubleSide });
-      addMesh(new THREE.SphereGeometry(1.1, 16, 12), holdMat, px, 1, pz);
-    }
-    return;
-  }
-  if (ext === 'storbox') {
-    // 收纳盒：敞口方槽 + 顶部翻边（卡搭在 1x1 框架顶杆上）+ 边耳
-    // 盒体需能穿过框架杆件内缘（<35.6cm），翻边外缘需盖过杆件中心（>20cm）搭在杆顶
-    const half = dims.w / 2; // 盒体半宽（dims.w≈34）
-    const boxH = 15; // 盒体高度（局部 0=盒底，boxH=盒口/翻边底）
-    const flangeThickness = 1; // 翻边厚度
-    const flangeWidth = 6; // 翻边向外延伸宽度（外缘半宽 = half + 6 = 23，盖过杆中心20）
-    const flangeOuter = half + flangeWidth; // 翻边外缘半宽
-    const flangeLen = dims.w - 4; // 每条翻边长度略短于盒体外缘，四角留缺口避让连接球
-
-    // 盒体四壁
-    addMesh(new THREE.BoxGeometry(dims.w, boxH, 0.4), mat, 0, boxH / 2, -half);
-    addMesh(new THREE.BoxGeometry(dims.w, boxH, 0.4), mat, 0, boxH / 2, half);
-    addMesh(new THREE.BoxGeometry(0.4, boxH, dims.d - 0.4), mat, -half, boxH / 2, 0);
-    addMesh(new THREE.BoxGeometry(0.4, boxH, dims.d - 0.4), mat, half, boxH / 2, 0);
-    // 底板
-    addMesh(new THREE.BoxGeometry(dims.w - 0.4, 0.4, dims.d - 0.4), mat, 0, 0.2, 0);
-
-    // 顶部翻边：四条独立条带，搭在四根框架顶杆上，四角留缺口避开连接件球
-    const flangeY = boxH + flangeThickness / 2;
-    // 前后翻边（沿 X 方向铺，搭在 z=±20 的杆上）
-    addMesh(new THREE.BoxGeometry(flangeLen, flangeThickness, flangeWidth), mat, 0, flangeY, -flangeOuter + flangeWidth / 2);
-    addMesh(new THREE.BoxGeometry(flangeLen, flangeThickness, flangeWidth), mat, 0, flangeY, flangeOuter - flangeWidth / 2);
-    // 左右翻边（沿 Z 方向铺，搭在 x=±20 的杆上）
-    addMesh(new THREE.BoxGeometry(flangeWidth, flangeThickness, flangeLen), mat, -flangeOuter + flangeWidth / 2, flangeY, 0);
-    addMesh(new THREE.BoxGeometry(flangeWidth, flangeThickness, flangeLen), mat, flangeOuter - flangeWidth / 2, flangeY, 0);
-
-    // 边耳（两侧小凸耳，位于左右翻边沿上）
-    const earMat = new THREE.MeshStandardMaterial({ color: '#e0e0e0', roughness: 0.6 });
-    addMesh(new THREE.BoxGeometry(2, 1.2, 3), earMat, -flangeOuter + flangeWidth / 2, boxH + 0.2, 0);
-    addMesh(new THREE.BoxGeometry(2, 1.2, 3), earMat, flangeOuter - flangeWidth / 2, boxH + 0.2, 0);
-    return;
-  }
-  if (ext === 'capsule') {
-    // 亚克力太空舱：透明亚克力方板 + 中心圆洞 + 透明半球舱
-    const panelW = spec.plateWidth;   // 39.5
-    const panelD = spec.plateDepth;   // 39.5
-    const panelT = spec.plateThickness ?? 1;
-    const domeR = 12;                  // 半球半径
-    const holeR = domeR * 0.85;        // 板面开洞半径（略小于半球半径，半球边缘嵌入板内）
-
-    const acrylicMat = new THREE.MeshStandardMaterial({
-      color: '#d6f0ff',
-      transparent: true,
-      opacity: 0.35,
-      roughness: 0.05,
-      metalness: 0.1,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-    });
-
-    // 1) 透明方板（中心开圆洞）
-    const shape = new THREE.Shape();
-    const hw = panelW / 2, hd = panelD / 2;
-    shape.moveTo(-hw, -hd);
-    shape.lineTo(hw, -hd);
-    shape.lineTo(hw, hd);
-    shape.lineTo(-hw, hd);
-    shape.closePath();
-    const hole = new THREE.Path();
-    hole.absarc(0, 0, holeR, 0, Math.PI * 2, false);
-    shape.holes.push(hole);
-    const panelGeo = new THREE.ExtrudeGeometry(shape, { depth: panelT, bevelEnabled: false });
-    panelGeo.rotateX(-Math.PI / 2); // 使板面水平，法线朝上
-    const panelMesh = new THREE.Mesh(panelGeo, acrylicMat);
-    panelMesh.position.y = 0;
-    panelMesh.castShadow = false;
-    panelMesh.receiveShadow = true;
-    group.add(panelMesh);
-
-    // 2) 透明半球舱（从板面中心向上凸起）
-    const domeGeo = new THREE.SphereGeometry(domeR, 32, 24, 0, Math.PI * 2, 0, Math.PI / 2);
-    const domeMesh = new THREE.Mesh(domeGeo, acrylicMat);
-    domeMesh.position.y = panelT / 2; // 半球底面贴在板面上
-    domeMesh.castShadow = false;
-    domeMesh.receiveShadow = false;
-    group.add(domeMesh);
-
-    // 3) 洞口边缘圆环（装饰，增强立体感）
-    const ringMat = new THREE.MeshStandardMaterial({
-      color: '#a0c8e8',
-      transparent: true,
-      opacity: 0.5,
-      roughness: 0.2,
-      metalness: 0.3,
-    });
-    const ringGeo = new THREE.TorusGeometry(holeR, 0.3, 8, 40);
-    const ringMesh = new THREE.Mesh(ringGeo, ringMat);
-    ringMesh.rotation.x = Math.PI / 2; // 水平放置
-    ringMesh.position.y = panelT / 2;
-    group.add(ringMesh);
-    return;
-  }
-
-  // 兜底：普通平台板（未命中分型的扩展板件也按板渲染）
-  const geo = createPlatformGeometry(spec);
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  group.add(mesh);
-}
-
-export function createPartMesh(part: PlacedPart, def: PartDefinition, color: string, opacity = 1, outlineColor?: string): THREE.Group {
-  const group = new THREE.Group();
-  // 兼容旧方案数据中缺失 position/rotation 的情况
-  const pos = part.position || [0, 0, 0];
-  const rot = part.rotation || [0, 0, 0];
-  group.position.set(pos[0], pos[1], pos[2]);
-  group.rotation.set(rot[0], rot[1], rot[2]);
-
-  const mat = new THREE.MeshStandardMaterial({
-    color,
-    roughness: 0.6,
-    metalness: 0.1,
-    transparent: opacity < 1,
-    opacity,
-    side: THREE.DoubleSide,
-  });
-
-  // 八字扣：两个并排的空心圆管连体（8字形双环），替代通用球+套筒造型
-  if (def.id === 'connector-bazi') {
-    const tubeLen = 5; // 单筒轴向长度（沿 X）
-    const tubeOuterR = 5.5 / 2; // 单筒外半径（与并排总宽 11 = 2×5.5 贴合）
-    const tubeInnerR = 4.5 / 2; // 单筒内半径（略大于杆外径 4.4，可套杆）
-    const geo = createBarTubeGeometry(tubeLen, tubeOuterR, tubeInnerR);
-    // 两筒沿 Z 方向并排贴合（中心距 = 外径 5.5）
-    const tubeA = new THREE.Mesh(geo, mat);
-    tubeA.position.set(0, 0, -tubeOuterR);
-    tubeA.castShadow = true;
-    tubeA.receiveShadow = true;
-    const tubeB = new THREE.Mesh(geo, mat);
-    tubeB.position.set(0, 0, tubeOuterR);
-    tubeB.castShadow = true;
-    tubeB.receiveShadow = true;
-    group.add(tubeA, tubeB);
-  } else if (def.extension && def.extKind) {
-    // ===== 扩展配件专属渲染（扩展杆件 / 扩展板件）=====
-    buildExtensionMesh(group, def, mat, createPlatformGeometry);
-  } else if (def.category === 'connector' && def.connectorSpec) {
-    const spec = def.connectorSpec;
-    const coreR = spec.centerDiameter / 2;
-    const socketR = spec.socketDiameter / 2;
-    const socketLen = spec.socketLength;
-
-    // 中心球体
-    const coreGeo = new THREE.SphereGeometry(coreR, 20, 16);
-    const core = new THREE.Mesh(coreGeo, mat);
-    core.castShadow = true;
-    core.receiveShadow = true;
-    group.add(core);
-
-    // 接口套筒（从中心球表面向外延伸 socketLen）
-    const points = def.connectionPoints || [];
-    for (const cp of points) {
-      const dir = new THREE.Vector3(cp.direction[0], cp.direction[1], cp.direction[2]).normalize();
-      // 嵌套套筒端（female）：空心管口，用来套住 male 凸头（外径 4cm）。
-      // 尺寸按 45度两通工程图：内径 4cm、外径 5cm、壁厚 0.5cm。
-      const isNest = cp.type === 'female';
-      // female 嵌套套筒：按 45度工程图水平端口轴向长 6.82cm；male 套筒仍用 socketLen(4cm)
-      const cpLen = isNest ? NEST_SOCKET_LENGTH : socketLen;
-      let socketGeo: THREE.BufferGeometry;
-      if (isNest) {
-        const nestOuterR = NEST_SOCKET_OUTER_DIAMETER / 2; // 外半径 2.5（外径 5）
-        const nestInnerR = NEST_SOCKET_INNER_DIAMETER / 2; // 内半径 2.0（内径 4）
-        // 空心管壁：LatheGeometry 沿 Y 轴旋转（与 male 实心 CylinderGeometry 同为 Y 轴，后续统一定向）
-        const pts: THREE.Vector2[] = [
-          new THREE.Vector2(nestOuterR, -cpLen / 2),
-          new THREE.Vector2(nestOuterR, cpLen / 2),
-          new THREE.Vector2(nestInnerR, cpLen / 2),
-          new THREE.Vector2(nestInnerR, -cpLen / 2),
-        ];
-        socketGeo = new THREE.LatheGeometry(pts, 24);
-      } else {
-        socketGeo = new THREE.CylinderGeometry(socketR, socketR, cpLen, 16);
-      }
-      // 对齐方向（默认圆柱/管壁沿 Y 轴，旋转到 dir）
-      const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
-      socketGeo.applyQuaternion(quat);
-      const socket = new THREE.Mesh(socketGeo, mat);
-      socket.castShadow = true;
-      socket.receiveShadow = true;
-      // 套筒从中心球表面向外延伸：位置 = 中心 + dir * (coreR + cpLen/2)
-      // female 外径更粗但定位基准仍取中心球表面起点，保证 male/female 贴合面对齐一致
-      socket.position.copy(dir.clone().multiplyScalar(coreR + cpLen / 2));
-      group.add(socket);
-    }
-  } else if (def.category === 'bar' && def.barSpec) {
-    // 中空圆管
-    const { length, outerDiameter, innerDiameter } = def.barSpec;
-    const geo = createBarTubeGeometry(length, outerDiameter / 2, innerDiameter / 2);
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    group.add(mesh);
-  } else if (def.category === 'platform' && def.platformSpec) {
-    // 平台板（平板 + 折边）
-    const geo = createPlatformGeometry(def.platformSpec);
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    // 让平台板的顶面在 y = 位置 + 厚度/2（即 group 位置对应板的中心）
-    // 折边向下伸，这正好符合几何设计
-    group.add(mesh);
-  } else {
-    // fallback
-    const { width, height, depth } = def.size;
-    const geo = new THREE.BoxGeometry(width, height, depth);
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.castShadow = true;
-    mesh.receiveShadow = true;
-    group.add(mesh);
-  }
-
-  // 外描边（选中高亮）
-  if (outlineColor) {
-    const edgesMat = new THREE.LineBasicMaterial({ color: outlineColor, linewidth: 2 });
-    group.traverse((child) => {
-      if (child instanceof THREE.Mesh && child.geometry) {
-        const edges = new THREE.EdgesGeometry(child.geometry, 1);
-        const line = new THREE.LineSegments(edges, edgesMat);
-        child.add(line);
-      }
-    });
-  }
-
-  return group;
-}
+const PLATFORM_SEATING_INSET = 0.2; // 同一层平台沿用生长放置的就位深度（cm）
 
 // 计算旋转后的最低Y值，确保不穿地
 function getRotatedBottomY(part: PlacedPart, def: PartDefinition, newRot: [number, number, number]): number {
@@ -958,6 +293,74 @@ function findBestSnap(
   return best;
 }
 
+// Exclude ports already joined to another part; proximity alone is not occupancy.
+function availablePorts(points: WorldConnPoint[], candidates = points) {
+  return candidates.filter(port => !points.some(other =>
+    other.partId !== port.partId && other.type !== port.type
+    && port.position.distanceTo(other.position) < 0.15
+    && port.direction.dot(other.direction) < -0.999,
+  ));
+}
+
+function findPickedPortFit(ray: THREE.Ray, part: PlacedPart, def: PartDefinition, scene: PlacedPart[]) {
+  const points = getWorldConnPoints(scene);
+  const local = getSelfWorldConnPoints(part, def);
+  const distance = (p: THREE.Vector3) => ray.distanceSqToPoint(p);
+  const candidates = availablePorts(points, points.filter(port => distance(port.position) < 9 ** 2))
+    .sort((a, b) => distance(a.position) - distance(b.position)
+      + (a.position.distanceTo(ray.origin) - b.position.distanceTo(ray.origin)) * 0.06);
+  for (const target of candidates) {
+    const ports = local.filter(port => port.type !== target.type)
+      .sort((a, b) => a.direction.dot(target.direction) - b.direction.dot(target.direction));
+    for (const port of ports) {
+      const pose = computeSnappedTransform(part, def, port, target);
+      const candidate = { ...part, ...pose };
+      const existing = scene.filter(other => new THREE.Vector3(...other.position).distanceToSquared(target.position) < 85 ** 2);
+      if (bodyIntersects([candidate], existing) || bodyIntersects(existing, [candidate])) continue;
+      if (def.barSpec && existing.some(other => {
+        const otherDef = getPartById(other.partId);
+        if (!otherDef?.barSpec) return false;
+        const line = new THREE.Vector3(1, 0, 0).applyEuler(new THREE.Euler(...pose.rotation));
+        const origin = new THREE.Vector3(...pose.position);
+        const offset = new THREE.Vector3(...other.position).sub(origin);
+        const along = offset.dot(line);
+        return Math.abs(along) < def.barSpec!.length / 2 + otherDef.barSpec.length / 2 - 1
+          && offset.addScaledVector(line, -along).lengthSq() < 3 ** 2;
+      })) continue;
+      return pose;
+    }
+  }
+  return null;
+}
+
+function findDoubleClampFit(ray: THREE.Ray, scene: PlacedPart[]) {
+  const rails = scene.flatMap(part => {
+    const bar = getPartById(part.partId)?.barSpec;
+    const center = new THREE.Vector3(...part.position);
+    return bar && ray.distanceSqToPoint(center) < (bar.length / 2 + 10) ** 2
+      ? [{ center, length: bar.length, axis: new THREE.Vector3(1, 0, 0).applyEuler(new THREE.Euler(...part.rotation)) }] : [];
+  });
+  let best: { position: PlacedPart['position']; rotation: PlacedPart['rotation']; distance: number } | null = null;
+  for (const [index, a] of rails.entries()) for (const b of rails.slice(index + 1)) {
+    if (Math.abs(a.axis.dot(b.axis)) < 0.998) continue;
+    const z = b.center.clone().sub(a.center);
+    const shift = z.dot(a.axis);
+    z.addScaledVector(a.axis, -shift);
+    if (Math.abs(z.length() - 5.5) > 0.2) continue;
+    const start = Math.max(-a.length / 2, shift - b.length / 2) + 2.5;
+    const end = Math.min(a.length / 2, shift + b.length / 2) - 2.5;
+    if (start >= end) continue;
+    const origin = a.center.clone().addScaledVector(z, 0.5);
+    const center = new THREE.Vector3();
+    const distance = ray.distanceSqToSegment(origin.clone().addScaledVector(a.axis, start), origin.clone().addScaledVector(a.axis, end), undefined, center);
+    if (distance > 7 ** 2 || (best && distance >= best.distance)) continue;
+    if (scene.some(part => part.partId === 'connector-bazi' && center.distanceToSquared(new THREE.Vector3(...part.position)) < 5 ** 2)) continue;
+    const y = z.normalize().cross(a.axis);
+    best = { position: center.toArray(), rotation: basisEuler(a.axis, y, a.axis.clone().cross(y)), distance };
+  }
+  return best;
+}
+
 // 计算吸附后的零件位置和旋转
 function computeSnappedTransform(
   part: PlacedPart,
@@ -997,78 +400,6 @@ function computeSnappedTransform(
   };
 }
 
-// 组合刚体吸附：将 45°L 嵌套组合整体「绕竖直轴旋转 + 平移」，使其中一闲置端与最近的杆件端口正确嵌套。
-// 关键：组合是「斜杆端(up45，仰角45°) + 立杆端(竖直向下)」的结构化形态，必须保持立杆始终竖直、斜杆保持45°仰角，
-// 只允许绕世界 Y 轴做水平旋转（镜像匹配屋顶左侧/右侧）与整体平移，避免被任意 3D 旋转扭转成横向横杆。
-function snapComboRigid(comboParts: PlacedPart[]): PlacedPart[] | null {
-  const comboIdSet = new Set(comboParts.map((p) => p.id));
-  const allParts = useStore.getState().parts;
-  const others = getWorldConnPoints(allParts).filter((cp) => !comboIdSet.has(cp.partId));
-  if (others.length === 0) return null;
-
-  const partSelf: { part: PlacedPart; def: PartDefinition; cps: WorldConnPoint[] }[] = [];
-  for (const p of comboParts) {
-    const def = getPartById(p.partId);
-    if (!def || !def.connectionPoints) continue;
-    partSelf.push({ part: p, def, cps: getSelfWorldConnPoints(p, def) });
-  }
-
-  const THRESH = SNAP_CONNECT_DIST + 15;
-  let best: { transform: PlacedPart[]; connected: number; alignDist: number } | null = null;
-
-  // 对每个组合 male 闲置端作为锚，匹配一个周围 female 杆件端口
-  for (const ps of partSelf) {
-    for (const sc of ps.cps) {
-      if (sc.type !== 'male') continue; // 锚点只用 male（套管），其插入杆件 female 凹口
-      for (const oc of others) {
-        if (oc.type !== 'female') continue;
-        const d0 = sc.position.distanceTo(oc.position);
-        if (d0 > THRESH) continue;
-
-        // 仅绕世界 Y 轴旋转：把 sc 的水平方向对准 -oc 的水平方向（竖直分量保持不变）
-        const a = new THREE.Vector3(sc.direction.x, 0, sc.direction.z).normalize();
-        const b = new THREE.Vector3(-oc.direction.x, 0, -oc.direction.z).normalize();
-        // 竖直朝向的端口水平投影可能接近零向量，此时无需水平旋转
-        let Qy: THREE.Quaternion;
-        if (a.lengthSq() > 1e-4 && b.lengthSq() > 1e-4) {
-          // a、b 均落在水平面上，最小旋转四元数即绕竖直轴 Y 的旋转（唯一、无歧义）
-          Qy = new THREE.Quaternion().setFromUnitVectors(a, b);
-        } else {
-          Qy = new THREE.Quaternion();
-        }
-        // 旋转后 sc 的世界位置（以 ps.part 位置为枢轴）
-        const pivot = new THREE.Vector3(ps.part.position[0], ps.part.position[1], ps.part.position[2]);
-        const scAfter = sc.position.clone().sub(pivot).applyQuaternion(Qy).add(pivot);
-        const deltaT = new THREE.Vector3().subVectors(oc.position, scAfter);
-
-        const transformed: PlacedPart[] = comboParts.map((p) => {
-          const pp = new THREE.Vector3(p.position[0], p.position[1], p.position[2]);
-          const rotated = pp.clone().sub(pivot).applyQuaternion(Qy).add(pivot).add(deltaT);
-          const pq = new THREE.Quaternion().setFromEuler(new THREE.Euler(p.rotation[0], p.rotation[1], p.rotation[2]));
-          const nq = new THREE.Quaternion().multiplyQuaternions(Qy, pq);
-          const ne = new THREE.Euler().setFromQuaternion(nq);
-          return { ...p, position: [rotated.x, rotated.y, rotated.z], rotation: [ne.x, ne.y, ne.z] };
-        });
-
-        // 统计整体对接端口数（含锚点），优先让最多闲置端真实对接；同数量取距离更近
-        let connected = 1;
-        for (const ts of partSelf) {
-          const tpart = transformed.find((p) => p.id === ts.part.id)!;
-          for (const tp of getSelfWorldConnPoints(tpart, ts.def)) {
-            if (tp.cpId === sc.cpId && ts.part.id === ps.part.id) continue; // 锚点已计入
-            if (findBestSnap([tp], others)) connected++;
-          }
-        }
-
-        if (!best || connected > best.connected || (connected === best.connected && d0 < best.alignDist)) {
-          best = { transform: transformed, connected, alignDist: d0 };
-        }
-      }
-    }
-  }
-  return best ? best.transform : null;
-}
-
 // —— 端点扩展：在元件的空闲扩展连接端生成半透明「幽灵扩展元件」——
 // 规则：
 //  - 杆件（female 两端管口）空闲端 → 幽灵「立六通」连接件，用于继续向外走杆
@@ -1084,7 +415,7 @@ function computeExtensionGhosts(src: PlacedPart): PlacedPart[] {
   const out: PlacedPart[] = [];
   for (const scp of sourceSelf) {
     // 若该端已与实体元件对接（可吸附到某个异性连接点），则不显示扩展
-    if (findBestSnap([scp], others)) continue;
+    if (findBestSnap([scp], others, 0.15, 2)) continue;
     const ghostPartId = def.category === 'bar' ? 'connector-v6' : 'bar-35';
     const gdef = getPartById(ghostPartId);
     if (!gdef) continue;
@@ -1102,7 +433,10 @@ function computeExtensionGhosts(src: PlacedPart): PlacedPart[] {
     const anchor = gSelf.find((c) => c.type !== scp.type);
     if (!anchor) continue;
     const tr = computeSnappedTransform(tempGhost, gdef, anchor, scp);
-    out.push({ ...tempGhost, position: tr.position, rotation: tr.rotation });
+    const ghost = def.category === 'bar'
+      ? endpointConnector(scp, tempGhost)
+      : { ...tempGhost, position: tr.position, rotation: tr.rotation };
+    if (!bodyIntersects([ghost], useStore.getState().parts)) out.push(ghost);
   }
   return out;
 }
@@ -1111,7 +445,17 @@ function findPlatformSnap(
   def: PartDefinition,
   allParts: PlacedPart[]
 ): { position: [number, number, number]; rotation: [number, number, number] } | null {
+  if (def.directPlacement === 'tall-rainbow-frame') {
+    const normal = new THREE.Vector3(0, 1, 0).applyEuler(new THREE.Euler(...part.rotation));
+    const center = new THREE.Vector3(...part.position);
+    const ray = new THREE.Ray(center.clone().addScaledVector(normal, 12), normal.clone().negate());
+    const fit = findTallRainbowFit(ray, allParts.filter(other => other.id !== part.id), def);
+    return fit && center.distanceTo(new THREE.Vector3(...fit.position)) < 12 ? fit : null;
+  }
   if (def.category !== 'platform' || !def.platformSpec) return null;
+  if (def.extKind === 'rainbow') {
+    return findPanelFit(new THREE.Vector3(...part.position), allParts, { excludeId: part.id });
+  }
   const spec = def.platformSpec;
 
   const partPos = new THREE.Vector3(part.position[0], part.position[1], part.position[2]);
@@ -1165,10 +509,12 @@ function findPlatformSnap(
     if (!matchW && !matchRotated) return;
 
     // 收纳盒：局部 Y 原点为盒底，翻边底位于 rimHeight，让翻边底面落在杆顶、盒体下沉到框架内；
-    // 普通平台板：板底落在杆顶
-    const newY = isStorbox
-      ? center.y + barRadius - spec.rimHeight + 0.15
-      : center.y + barRadius + spec.plateThickness / 2;
+    // 普通平台板和玻璃板共用生长放置时的高度基准。
+    const flushPlatform = !def.extension || def.extKind === 'glass';
+    let offset = spec.plateThickness / 2;
+    if (isStorbox) offset = -spec.rimHeight + 0.15;
+    if (flushPlatform) offset = PLATE_THICKNESS / 2 - PLATFORM_SEATING_INSET;
+    const newY = center.y + barRadius + offset;
 
     // 水平距离（相对当前板位置）需足够近
     const hTarget = new THREE.Vector3(center.x, partPos.y, center.z);
@@ -1253,13 +599,12 @@ function basisEuler(
   return [e.x, e.y, e.z];
 }
 
-// 生长模式的通用“平台/立面封板自动识别”：
-// - 水平矩形框架 → 在顶面铺平台板（按框架尺寸自动挑型号）
-// - 竖直矩形框架 → 生成竖立封板（立面板）
-// 返回最佳点位（离光标最近），已做“已存在平台”去重。
+// 沿鼠标射线识别四杆围成的实际矩形面，供生长铺板、配件库吸附和彩虹门使用。
 function findPanelFit(
   cursor: { x: number; y: number; z: number },
-  allParts: PlacedPart[]
+  allParts: PlacedPart[],
+  rainbow?: { excludeId?: string; ray?: THREE.Ray },
+  rectangular?: { def?: PartDefinition; ray: THREE.Ray; maxDistance?: number }
 ): {
   partId: string;
   position: [number, number, number];
@@ -1299,10 +644,14 @@ function findPanelFit(
   }
 
   // 只取光标附近最近的一批杆件（控制 C(n,4) 枚举量；框架旋转任意角度均不受影响）
+  const pointerRay = rectangular?.ray ?? rainbow?.ray;
+  const distanceToPointer = (point: THREE.Vector3) => pointerRay
+    ? pointerRay.distanceSqToPoint(point)
+    : point.distanceToSquared(cursorV);
   const nearBars = bars
-    .filter((b) => b.center.distanceTo(cursorV) < 75)
-    .sort((a, b) => a.center.distanceTo(cursorV) - b.center.distanceTo(cursorV))
-    .slice(0, 16);
+    .filter((b) => distanceToPointer(b.center) < 75 ** 2)
+    .sort((a, b) => distanceToPointer(a.center) - distanceToPointer(b.center))
+    .slice(0, rectangular ? 20 : 16);
   if (nearBars.length < 4) return null;
 
   const holder: { best: PanelFit | null } = { best: null };
@@ -1311,30 +660,30 @@ function findPanelFit(
     if (!holder.best || candidate.dist < holder.best.dist) holder.best = candidate;
   };
 
-  // 平台型号匹配（尺寸 ±13 容差，允许宽深 swap）
-  const matchPlatform = (w: number, d: number): { def: PartDefinition; swap: boolean } | null => {
+  // 按框格边长自动选规格，允许宽深互换。
+  const matchPlatform = (w: number, d: number): PartDefinition | null => {
     let chosen: PartDefinition | null = null;
-    let swap = false;
     let bestDiff = Infinity;
     for (const pl of platforms) {
       const sp = pl.platformSpec!;
       const diff1 = Math.abs(w - sp.plateWidth) + Math.abs(d - sp.plateDepth);
       const diff2 = Math.abs(w - sp.plateDepth) + Math.abs(d - sp.plateWidth);
       const m = Math.min(diff1, diff2);
-      if (m <= 13 && m < bestDiff) {
+      const direct = Math.abs(w - sp.plateWidth) < 3 && Math.abs(d - sp.plateDepth) < 3;
+      const rotated = Math.abs(w - sp.plateDepth) < 3 && Math.abs(d - sp.plateWidth) < 3;
+      if ((direct || rotated) && m < bestDiff) {
         bestDiff = m;
         chosen = pl;
-        swap = diff2 < diff1;
       }
     }
-    return chosen ? { def: chosen, swap } : null;
+    return chosen;
   };
 
   // 该位置是否已有平台
   const hasPlatformAt = (x: number, y: number, z: number) =>
     allParts.some((p) => {
       const pd = getPartById(p.partId);
-      return pd && pd.category === 'platform' && Math.abs(p.position[0] - x) < 2 && Math.abs(p.position[1] - y) < 2 && Math.abs(p.position[2] - z) < 2;
+      return p.id !== rainbow?.excludeId && pd && pd.category === 'platform' && Math.abs(p.position[0] - x) < 2 && Math.abs(p.position[1] - y) < 2 && Math.abs(p.position[2] - z) < 2;
     });
 
   // 通用矩形枚举：任取 4 根杆，3 种配对找"两对平行 + 两对垂直 + 4 杆共面 + 中点重合"。
@@ -1374,41 +723,76 @@ function findPanelFit(
       const lenAlongU = c.center.clone().sub(d.center).projectOnVector(u).length();
       const center = a.center.clone().add(b.center).add(c.center).add(d.center).multiplyScalar(0.25);
 
-      // 水平开口（顶面/底面封板）：法线接近竖直
-      if (Math.abs(n.y) > 0.7) {
-        if (Math.abs(u.y) > 0.3 || Math.abs(v.y) > 0.3) continue;
-        const matched = matchPlatform(lenAlongU, lenAlongV);
-        if (!matched) continue;
-        const barRadius = q.reduce((s, g) => s + g.def.size.height, 0) / 8;
-        const posY = center.y + barRadius + matched.def.platformSpec!.plateThickness / 2 - 0.2;
-        if (hasPlatformAt(center.x, posY, center.z)) continue;
-        // 宽 local+X / 厚 local+Y(上) / 深 local+Z；basisEuler 内部做右手系校正
-        const rotation: [number, number, number] = matched.swap
-          ? basisEuler(v, UP, u)
-          : basisEuler(u, UP, v);
-        consider({ partId: matched.def.id, position: [center.x, posY, center.z], rotation, dist: center.distanceTo(cursorV) });
+      if (rectangular) {
+        const { ray, maxDistance = Infinity } = rectangular;
+        const upright = Math.abs(n.y) < 0.2;
+        const horizontal = Math.abs(n.y) > 0.98;
+        if (upright && Math.abs(u.y) > Math.abs(v.y)) {
+          u.copy(vAxis);
+          v.copy(uAxis);
+        }
+        const swapAxes = upright && Math.abs(uAxis.y) > Math.abs(vAxis.y);
+        const width = swapAxes ? lenAlongV : lenAlongU;
+        const depth = swapAxes ? lenAlongU : lenAlongV;
+        // The frame must have supporting rails along its full four sides.
+        const lengthsMatch = (bars: [BarInfo, BarInfo], length: number) =>
+          bars.every(bar => Math.abs((bar.def.barSpec?.length ?? 0) + 5 - length) < 3);
+        if (!lengthsMatch([a, b], lenAlongU) || !lengthsMatch([c, d], lenAlongV)) continue;
+        const def = rectangular.def ?? matchPlatform(width, depth);
+        const spec = def?.platformSpec;
+        if (!def || !spec || ((def.extKind === 'storbox' || def.extKind === 'pouch') && !horizontal)) continue;
+        const expectedW = def.extKind === 'storbox' ? 40 : spec.plateWidth;
+        const expectedD = def.extKind === 'storbox' ? 40 : spec.plateDepth;
+        const matches = (w: number, d: number) => Math.abs(width - w) < 3 && Math.abs(depth - d) < 3;
+        if (!matches(expectedW, expectedD) && !matches(expectedD, expectedW)) continue;
+        const swap = !matches(expectedW, expectedD);
+
+        if (upright) {
+          if (Math.abs(u.y) > 0.2 || Math.abs(v.y) < 0.95) continue;
+          if (v.y < 0) v.negate();
+          n.crossVectors(u, v).normalize();
+          if (ray.origin.clone().sub(center).dot(n) < 0) n.negate();
+        } else if (n.y < 0) n.negate();
+        const hit = ray.intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(n, center), new THREE.Vector3());
+        const distance = hit?.distanceTo(ray.origin);
+        if (!hit || distance === undefined || distance > maxDistance) continue;
+        const offset = hit.clone().sub(center);
+        if (Math.abs(offset.dot(u)) > width / 2 + 0.8 || Math.abs(offset.dot(v)) > depth / 2 + 0.8) continue;
+        if (allParts.some(part => {
+          if (getPartById(part.partId)?.category !== 'platform') return false;
+          const delta = new THREE.Vector3(...part.position).sub(center);
+          const onPlane = delta.dot(n);
+          return Math.abs(onPlane) < 8 && delta.addScaledVector(n, -onPlane).lengthSq() < 4 ** 2;
+        })) continue;
+        const radius = q.reduce((sum, bar) => sum + (bar.def.barSpec?.outerDiameter ?? 4.4), 0) / 8;
+        const seat = def.extKind === 'storbox' ? radius - spec.rimHeight + 0.15
+          : radius + PLATE_THICKNESS / 2 - PLATFORM_SEATING_INSET;
+        if (upright && !swap && u.clone().cross(n).dot(v) < 0) u.negate();
+        const rotation = swap ? basisEuler(v, n, u) : basisEuler(u, n, v);
+        consider({ partId: def.id, position: center.addScaledVector(n, upright ? 0 : seat).toArray(), rotation, dist: distance });
         continue;
       }
 
-      // 竖直开口（立面封板）：法线接近水平；两对中一对水平（上下边）、一对竖直（左右边）
-      if (Math.abs(n.y) < 0.4) {
-        const pairUhoriz = Math.abs(u.y) < 0.3;
-        const pairVhoriz = Math.abs(v.y) < 0.3;
-        if (pairUhoriz === pairVhoriz) continue; // 必须恰有一对水平、一对竖直
-        // hAxis=上下水平杆方向（矩形宽边方向）；宽=左右竖直杆间距，高=上下水平杆间距
-        const hAxis = pairUhoriz ? u : v;
-        const width = pairUhoriz ? lenAlongV : lenAlongU;
-        const height = pairUhoriz ? lenAlongU : lenAlongV;
-        const matched = matchPlatform(width, height);
-        if (!matched) continue;
-        if (hasPlatformAt(center.x, center.y, center.z)) continue;
-        // 宽 local+X 沿水平边、厚 local+Y 沿墙面法线、高 local+Z 沿世界竖直
-        const rotation: [number, number, number] = matched.swap
-          ? basisEuler(UP, n, hAxis)
-          : basisEuler(hAxis, n, UP);
-        consider({ partId: matched.def.id, position: [center.x, center.y, center.z], rotation, dist: center.distanceTo(cursorV) });
-      }
-      // 斜向开口（0.4~0.7）既非水平也非竖直封板，忽略
+      // 彩虹门仅匹配竖向 40 × 40 cm 框格。
+      if (!rainbow || Math.abs(n.y) >= 0.4) continue;
+      const uHorizontal = Math.abs(u.y) < 0.3;
+      if (uHorizontal === (Math.abs(v.y) < 0.3)) continue;
+      const hAxis = uHorizontal ? u : v;
+      const width = uHorizontal ? lenAlongU : lenAlongV;
+      const height = uHorizontal ? lenAlongV : lenAlongU;
+      const spec = getPartById('ext-plate-rainbow')!.platformSpec!;
+      if (Math.abs(width - spec.plateWidth) > 1.5 || Math.abs(height - spec.plateDepth) > 1.5) continue;
+      if (hasPlatformAt(center.x, center.y, center.z)) continue;
+      let dist = center.distanceTo(cursorV);
+      if (rainbow.ray) {
+        const hit = rainbow.ray.intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(n, center), new THREE.Vector3());
+        if (!hit) continue;
+        const offset = hit.clone().sub(center);
+        if (Math.abs(offset.dot(hAxis)) > width / 2 + 1 || Math.abs(offset.y) > height / 2 + 1) continue;
+        dist = hit.distanceTo(rainbow.ray.origin);
+      } else if (dist > 32) continue;
+      const facing = new THREE.Vector3().crossVectors(UP, hAxis).normalize();
+      consider({ partId: 'ext-plate-rainbow', position: center.toArray(), rotation: basisEuler(hAxis, facing, UP), dist });
     }
   };
 
@@ -1421,150 +805,6 @@ function findPanelFit(
 
   return holder.best ? { partId: holder.best.partId, position: holder.best.position, rotation: holder.best.rotation } : null;
 }
-
-// 板件镜像：先识别与平台板四边相交接的 4 根杆件所构成的矩形平面（镜面），
-// 再以该平面为镜像面把板镜像到对侧。整个计算只依赖实际杆件的世界方向与位置，
-// 不使用板自身本地轴/世界固定轴，因此无论框架整体旋转到什么角度、板是否手动放置，
-// 镜像后都与框架精确贴合、不会错位。
-// 对中心对称的矩形板，绕镜面内铰链轴转 180° 的刚体变换与"平面反射"视觉等价，
-// 且铰链轴取镜面内最接近世界竖直的方向，保证翻转后上下不倒置。
-// 收纳盒（storbox）为不对称敞口容器，镜像无工程意义，不支持（返回 null）。
-// 返回镜像后的世界 position / rotation；找不到相接杆件矩形时返回 null。
-function mirrorPlatformTransform(
-  part: PlacedPart,
-  def: PartDefinition,
-  allParts: PlacedPart[]
-): { position: [number, number, number]; rotation: [number, number, number] } | null {
-  if (def.category !== 'platform' || !def.platformSpec || def.extKind === 'storbox') return null;
-  const spec = def.platformSpec;
-  const partPos = new THREE.Vector3(part.position[0], part.position[1], part.position[2]);
-  const q0 = new THREE.Quaternion().setFromEuler(new THREE.Euler(part.rotation[0], part.rotation[1], part.rotation[2]));
-  const normalWorld = new THREE.Vector3(0, 1, 0).applyQuaternion(q0); // 板厚方向（法线）
-
-  // 收集附近杆件：中心、无向世界轴、两端点世界坐标
-  interface BarInfo { center: THREE.Vector3; axis: THREE.Vector3; e0: THREE.Vector3; e1: THREE.Vector3 }
-  const bars: BarInfo[] = [];
-  for (const p of allParts) {
-    if (p.id === part.id) continue;
-    const pd = getPartById(p.partId);
-    if (!pd || pd.category !== 'bar' || !pd.connectionPoints || pd.connectionPoints.length < 2) continue;
-    const c = new THREE.Vector3(p.position[0], p.position[1], p.position[2]);
-    if (c.distanceTo(partPos) > Math.max(spec.plateWidth, spec.plateDepth) + 25) continue;
-    const bq = new THREE.Quaternion().setFromEuler(new THREE.Euler(p.rotation[0], p.rotation[1], p.rotation[2]));
-    const ep = pd.connectionPoints.map((cp) =>
-      new THREE.Vector3(cp.position[0], cp.position[1], cp.position[2]).applyQuaternion(bq).add(c)
-    );
-    bars.push({ center: c, axis: ep[1].clone().sub(ep[0]).normalize(), e0: ep[0], e1: ep[1] });
-  }
-  if (bars.length < 4 || bars.length > 24) return null;
-
-  const sizeMatch = (w: number, h: number) =>
-    (Math.abs(w - spec.plateWidth) < 10 && Math.abs(h - spec.plateDepth) < 10)
-    || (Math.abs(w - spec.plateDepth) < 10 && Math.abs(h - spec.plateWidth) < 10);
-
-  const Y = new THREE.Vector3(0, 1, 0);
-  interface MirrorPlane { center: THREE.Vector3; normal: THREE.Vector3; u: THREE.Vector3; dist: number }
-  let best: MirrorPlane | null = null;
-
-  // 枚举 4 根杆的组合，判断能否构成与板贴合的矩形框架平面
-  const N = bars.length;
-  for (let a = 0; a < N; a++) {
-    for (let b = a + 1; b < N; b++) {
-      for (let c = b + 1; c < N; c++) {
-        for (let d = c + 1; d < N; d++) {
-          const quad = [bars[a], bars[b], bars[c], bars[d]];
-          // 3 种配对方式，找"两对平行 + 两对互相垂直"
-          const pairings: Array<[number, number, number, number]> = [[0, 1, 2, 3], [0, 2, 1, 3], [0, 3, 1, 2]];
-          let u: THREE.Vector3 | null = null;
-          let v: THREE.Vector3 | null = null;
-          for (const [i, j, k, l] of pairings) {
-            const ai = quad[i].axis, aj = quad[j].axis, ak = quad[k].axis, al = quad[l].axis;
-            if (Math.abs(ai.dot(aj)) > 0.985 && Math.abs(ak.dot(al)) > 0.985 && Math.abs(ai.dot(ak)) < 0.18) {
-              u = ai.clone();
-              v = ak.clone();
-              break;
-            }
-          }
-          if (!u || !v) continue;
-          const n = new THREE.Vector3().crossVectors(u, v).normalize();
-          // 4 根杆共面（杆中心到过 quad[0] 中心、法向 n 的平面距离）
-          const p0 = quad[0].center;
-          let coplanar = true;
-          for (const qd of quad) {
-            if (Math.abs(qd.center.clone().sub(p0).dot(n)) > 4) { coplanar = false; break; }
-          }
-          if (!coplanar) continue;
-          // 8 个端点聚类成 4 个角点（不同杆之间距离 <8 合并），每角恰好 2 个端点
-          const endpoints: { pos: THREE.Vector3; bar: number }[] = [];
-          quad.forEach((qd, bi) => { endpoints.push({ pos: qd.e0, bar: bi }, { pos: qd.e1, bar: bi }); });
-          const parent = [0, 1, 2, 3, 4, 5, 6, 7];
-          const find = (x: number): number => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
-          for (let i = 0; i < 8; i++) {
-            for (let j = i + 1; j < 8; j++) {
-              if (endpoints[i].bar === endpoints[j].bar) continue;
-              if (endpoints[i].pos.distanceTo(endpoints[j].pos) < 8) {
-                const ri = find(i), rj = find(j);
-                if (ri !== rj) parent[ri] = rj;
-              }
-            }
-          }
-          const groups = new Map<number, THREE.Vector3[]>();
-          for (let i = 0; i < 8; i++) {
-            const r = find(i);
-            if (!groups.has(r)) groups.set(r, []);
-            groups.get(r)!.push(endpoints[i].pos);
-          }
-          if (groups.size !== 4) continue;
-          const garr = [...groups.values()];
-          if (garr.some((g) => g.length !== 2)) continue;
-          const corners = garr.map((g) => g[0].clone().add(g[1]).multiplyScalar(0.5));
-          // 角点按绕中心方位角排序
-          const ctr = corners[0].clone().add(corners[1]).add(corners[2]).add(corners[3]).multiplyScalar(0.25);
-          corners.sort((c1, c2) => Math.atan2(
-            new THREE.Vector3().crossVectors(c1.clone().sub(ctr), c2.clone().sub(ctr)).dot(n),
-            c1.clone().sub(ctr).dot(c2.clone().sub(ctr))
-          ));
-          // 矩形校验：邻边垂直 + 对边等长
-          const edges = [0, 1, 2, 3].map((i) => corners[(i + 1) % 4].clone().sub(corners[i]));
-          const elen = edges.map((e) => e.length());
-          if (Math.abs(edges[0].dot(edges[1])) > 0.15 * elen[0] * elen[1]) continue;
-          if (Math.abs(edges[1].dot(edges[2])) > 0.15 * elen[1] * elen[2]) continue;
-          if (Math.abs(elen[0] - elen[2]) > 6 || Math.abs(elen[1] - elen[3]) > 6) continue;
-          const w = (elen[0] + elen[2]) / 2;
-          const h = (elen[1] + elen[3]) / 2;
-          if (w < 10 || h < 10 || !sizeMatch(w, h)) continue;
-          // 板须贴合该平面：板中心在镜面内（法向距离 <5）、板法线与镜面法线近似平行
-          const pc = partPos.clone().sub(ctr);
-          if (Math.abs(pc.dot(n)) > 5) continue;
-          if (Math.abs(normalWorld.dot(n)) < 0.8) continue;
-          const dist = pc.length();
-          if (dist > 18) continue;
-          if (!best || dist < best.dist) best = { center: ctr, normal: n.clone(), u: u.clone(), dist };
-        }
-      }
-    }
-  }
-  if (!best) return null;
-
-  // ===== 以杆件矩形平面为镜面进行镜像 =====
-  const n = best.normal;
-  // 位置：对镜面（过矩形中心）做平面反射；水平搭放的贴合偏移会自动反射到对侧。
-  const off = partPos.clone().sub(best.center);
-  const newPos = partPos.clone().addScaledVector(n, -2 * off.dot(n));
-  // 姿态：绕镜面内"铰链轴"转 180°（视觉等价于反射，且为合法刚体旋转）。
-  // 铰链轴取世界竖直方向在镜面内的投影，保证翻转后上下不倒；镜面近水平时退化为镜面内 u 方向。
-  let hinge = Y.clone().addScaledVector(n, -Y.dot(n));
-  if (hinge.length() < 0.25) hinge = best.u.clone();
-  hinge.normalize();
-  const qRot = new THREE.Quaternion().setFromAxisAngle(hinge, Math.PI); // 世界系轴，左乘
-  const qNew = qRot.multiply(q0);
-  const e = new THREE.Euler().setFromQuaternion(qNew, 'XYZ');
-  return {
-    position: [newPos.x, newPos.y, newPos.z],
-    rotation: [e.x, e.y, e.z],
-  };
-}
-
 
 function createGizmo(): THREE.Group {
   const gizmo = new THREE.Group();
@@ -1676,13 +916,12 @@ export default function Scene3D() {
   // 端点扩展幽灵：空闲扩展连接端显示的半透明待部署元件
   const extGhostGroupRef = useRef<THREE.Group | null>(null);
   const platGhostGroupRef = useRef<THREE.Group | null>(null);
-  const platGhostDataRef = useRef<{ position: [number, number, number]; rotation: [number, number, number] } | null>(null);
-  const platGhostPartIdRef = useRef<string | null>(null);
+  const platGhostDataRef = useRef<RoofPanelFit | null>(null);
   const extGhostDataRef = useRef<{ partId: string; position: [number, number, number]; rotation: [number, number, number]; group: THREE.Group }[]>([]);
   const [extCount, setExtCount] = useState(0);
   const selectionRectRef = useRef<HTMLDivElement>(null);
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; ids: string[] } | null>(null);
-  const dragState = useRef({ isDown: false, isDragging: false, startX: 0, startY: 0, dragPartId: null as string | null, axisDir: null as THREE.Vector3 | null, planeNormal: null as THREE.Vector3 | null, planePos: null as THREE.Vector3 | null, isArc: false, startQuat: null as THREE.Quaternion | null, startAngle: 0, initialPos: null as [number, number, number] | null, initialT: 0, snapped: false, isSelecting: false, selOrigin: null as { x: number; y: number } | null, selCur: null as { x: number; y: number } | null, historyPushed: false, altCopy: false, groupSnap: null as { id: string; position: [number, number, number]; rotation: [number, number, number] }[] | null, groupAnchor: null as { x: number; y: number; z: number } | null, groupAxis: null as THREE.Vector3 | null, ghostActive: false, ghostSrcId: null as string | null, anchorCopyId: null as string | null, rigidSnap: null as { driverId: string; driverStart: [number, number, number]; members: { id: string; start: [number, number, number] }[] } | null });
+  const dragState = useRef({ isDown: false, isDragging: false, startX: 0, startY: 0, dragPartId: null as string | null, axisDir: null as THREE.Vector3 | null, planeNormal: null as THREE.Vector3 | null, planePos: null as THREE.Vector3 | null, isArc: false, startQuat: null as THREE.Quaternion | null, startAngle: 0, initialPos: null as [number, number, number] | null, initialT: 0, snapped: false, isSelecting: false, selOrigin: null as { x: number; y: number } | null, historyPushed: false, altCopy: false, groupSnap: null as { id: string; position: [number, number, number]; rotation: [number, number, number] }[] | null, groupAnchor: null as { x: number; y: number; z: number } | null, groupAxis: null as THREE.Vector3 | null, ghostActive: false, ghostSrcId: null as string | null, anchorCopyId: null as string | null, rigidSnap: null as { driverId: string; driverStart: [number, number, number]; members: { id: string; start: [number, number, number] }[] } | null });
   // 分组操作：当前选中的几何中心（供整组转动/移动）
   const groupCenterRef = useRef<{ x: number; y: number; z: number }>({ x: 0, y: 0, z: 0 });
   // 操作轴旁边的"组信息"标签：用于展示/重命名组、快捷取消成组
@@ -1713,9 +952,13 @@ export default function Scene3D() {
     return grp !== undefined;
   });
   const [tagGroupId, setTagGroupId] = useState<string | null>(null);
+  const [snapFeedback, setSnapFeedback] = useState(false);
+  const [viewportState, setViewportState] = useState<'ready' | 'recovering' | 'failed'>('ready');
+  const retryViewportRef = useRef<(() => void) | null>(null);
   const [editingGroupId, setEditingGroupId] = useState<string | null>(null);
   const [nameDraft, setNameDraft] = useState('');
   const groupTagElRef = useRef<HTMLDivElement | null>(null);
+  const rotateControl = useRef<{ element: HTMLButtonElement; anchor: THREE.Vector3 } | null>(null);
 
   // 提交组重命名
   const commitRename = () => {
@@ -1747,20 +990,14 @@ export default function Scene3D() {
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0xF0F4F6);
 
-    const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 1, 5000);
+    const camera = new THREE.PerspectiveCamera(45, Math.max(1, container.clientWidth) / Math.max(1, container.clientHeight), 1, 5000);
     camera.position.set(150, 120, 150);
     camera.lookAt(0, 0, 0);
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setSize(container.clientWidth, container.clientHeight);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.1;
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    container.appendChild(renderer.domElement);
-
-    const controls = new OrbitControls(camera, renderer.domElement);
+    let renderer: THREE.WebGLRenderer | null = null;
+    let recoveryTimer: ReturnType<typeof setTimeout> | undefined;
+    let contextLost = false;
+    const controls = new OrbitControls(camera);
     controls.target.set(0, 0, 0);
     controls.enableDamping = true;
     controls.dampingFactor = 0.1;
@@ -1862,17 +1099,45 @@ export default function Scene3D() {
     scene.add(partsGroup);
 
     // 保存ref
-    sceneRef.current = { scene, camera, renderer, controls, ground, gridHelper, partsGroup, gizmo,
+    sceneRef.current = { scene, camera, controls, ground, gridHelper, partsGroup, gizmo,
       raycaster: new THREE.Raycaster(),
       pointer: new THREE.Vector2(),
     };
 
     // 动画循环
     let rafId = 0;
+    const rotationScreen = new THREE.Vector3();
     const animate = () => {
       rafId = requestAnimationFrame(animate);
-      controls.update();
-      renderer.render(scene, camera);
+      if (!renderer || contextLost || container.clientWidth === 0 || container.clientHeight === 0) return;
+      try {
+        controls.update();
+        if (!camera.position.toArray().every(Number.isFinite) || !controls.target.toArray().every(Number.isFinite)) {
+          resetCamera();
+        }
+        renderer.render(scene, camera);
+      } catch (error) {
+        console.error('3D viewport render failed', error);
+        contextLost = true;
+        setViewportState('failed');
+        return;
+      }
+      const rotation = rotateControl.current;
+      if (rotation) {
+        const point = rotationScreen.copy(rotation.anchor).project(camera);
+        const visible = Math.abs(point.x) <= 1 && Math.abs(point.y) <= 1 && Math.abs(point.z) <= 1;
+        rotation.element.style.visibility = visible ? 'visible' : 'hidden';
+        if (visible) {
+          const width = container.clientWidth;
+          const height = container.clientHeight;
+          const x = (point.x + 1) * width / 2;
+          const y = (1 - point.y) * height / 2;
+          const buttonWidth = rotation.element.offsetWidth;
+          const left = x + 18 + buttonWidth <= width - 8 ? x + 18 : Math.max(8, x - buttonWidth - 18);
+          const top = THREE.MathUtils.clamp(y - 18, 8, Math.max(8, height - 46));
+          rotation.element.style.transform = `translate3d(${left.toFixed(1)}px, ${top.toFixed(1)}px, 0)`;
+        }
+      }
       // 让"组信息"标签跟随操作轴中心贴齐到屏幕
       const tagEl = groupTagElRef.current;
       if (tagEl) {
@@ -1885,7 +1150,6 @@ export default function Scene3D() {
         tagEl.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0) translate(-50%, calc(-100% - 58px))`;
       }
     };
-    animate();
 
     // 窗口resize
     const onResize = () => {
@@ -1894,16 +1158,19 @@ export default function Scene3D() {
       if (w === 0 || h === 0) return;
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
-      renderer.setSize(w, h);
+      if (renderer && !contextLost) renderer.setSize(w, h);
     };
     window.addEventListener('resize', onResize);
     const resizeObserver = new ResizeObserver(onResize);
     resizeObserver.observe(container);
 
     // —— 顶部菜单触发的视角操作事件：重置 / 平移 / 旋转 ——
-    const onCameraReset = () => {
+    function resetCamera() {
+      const damping = controls.enableDamping;
+      controls.enableDamping = false;
+      controls.reset();
       const bounds = new THREE.Box3().setFromObject(partsGroup);
-      if (bounds.isEmpty()) {
+      if (bounds.isEmpty() || ![...bounds.min.toArray(), ...bounds.max.toArray()].every(Number.isFinite)) {
         camera.position.set(150, 120, 150);
         controls.target.set(0, 0, 0);
       } else {
@@ -1915,6 +1182,62 @@ export default function Scene3D() {
         camera.position.copy(sphere.center).add(new THREE.Vector3(1, 0.7, 1).normalize().multiplyScalar(distance));
       }
       controls.update();
+      controls.enableDamping = damping;
+    }
+    function onContextLost(event: Event) {
+      event.preventDefault();
+      contextLost = true;
+      setViewportState('recovering');
+      clearTimeout(recoveryTimer);
+      recoveryTimer = setTimeout(rebuildRenderer, 2500);
+    }
+    function onContextRestored() {
+      clearTimeout(recoveryTimer);
+      contextLost = false;
+      onResize();
+      setViewportState('ready');
+    }
+    function releaseRenderer() {
+      if (!renderer) return;
+      const canvas = renderer.domElement;
+      canvas.removeEventListener('webglcontextlost', onContextLost);
+      canvas.removeEventListener('webglcontextrestored', onContextRestored);
+      if (controls.domElement === canvas) controls.disconnect();
+      renderer.dispose();
+      renderer.forceContextLoss();
+      canvas.remove();
+      renderer = null;
+    }
+    function rebuildRenderer() {
+      clearTimeout(recoveryTimer);
+      releaseRenderer();
+      try {
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.1;
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        const canvas = renderer.domElement;
+        canvas.addEventListener('webglcontextlost', onContextLost);
+        canvas.addEventListener('webglcontextrestored', onContextRestored);
+        container!.appendChild(canvas);
+        controls.connect(canvas);
+        contextLost = false;
+        onResize();
+        setViewportState('ready');
+      } catch (error) {
+        console.error('Could not initialize the 3D viewport', error);
+        releaseRenderer();
+        setViewportState('failed');
+      }
+    }
+    retryViewportRef.current = rebuildRenderer;
+    rebuildRenderer();
+    animate();
+    const onCameraReset = () => {
+      resetCamera();
+      if (!renderer || contextLost) rebuildRenderer();
     };
     const onCameraPan = () => {
       // 沿观察方向的水平横向平移视角（保持俯仰，整体平视移动）
@@ -1949,8 +1272,12 @@ export default function Scene3D() {
       window.removeEventListener('gizmo-reset-camera', onCameraReset);
       window.removeEventListener('gizmo-pan-camera', onCameraPan);
       window.removeEventListener('gizmo-rotate-camera', onCameraRotate);
-      container.removeChild(renderer.domElement);
-      renderer.dispose();
+      clearTimeout(recoveryTimer);
+      retryViewportRef.current = null;
+      releaseRenderer();
+      disposeGroup(scene);
+      partsGroup.clear();
+      sceneRef.current = null;
     };
   }, []);
 
@@ -1959,13 +1286,7 @@ export default function Scene3D() {
     const ref = sceneRef.current;
     if (!ref) return;
     const partsGroup = ref.partsGroup;
-    // 清理旧的
-    while (partsGroup.children.length > 0) {
-      const child = partsGroup.children[0];
-      disposeGroup(child);
-      partsGroup.remove(child);
-    }
-    // 重新渲染
+    const existing = new Map(partsGroup.children.map(child => [child.userData.partId, child]));
     const parts = useStore.getState().parts;
     const selectedIds = useStore.getState().selectedIds;
     const hoveredId = useStore.getState().hoveredPartId;
@@ -1973,19 +1294,33 @@ export default function Scene3D() {
     parts.forEach((part: PlacedPart) => {
       const def = getPartById(part.partId);
       if (!def) return;
-      const colorList = def.category === 'connector' ? CONNECTOR_COLORS : PART_COLORS;
-      const color = colorList.find((c: { id: string }) => c.id === (part.colorId || def.defaultColor))?.hex || '#CCCCCC';
+      const color = getPartColor(def, part.colorId || def.defaultColor)?.hex ?? '#CCCCCC';
       // 多选高亮描边：选中=天空蓝，悬停=浅蓝
       const isSel = selectedIds.includes(part.id);
       const isHover = part.id === hoveredId;
       const outlineColor = isSel ? '#4A90D9' : isHover ? '#8FBDE8' : undefined;
       // Alt 复制中且与原物重合 → 红色半透明幽灵
       const isGhost = part.id === ghostCopyId;
+      const previous = existing.get(part.id);
+      existing.delete(part.id);
+      if (previous?.userData.sourcePart === part && previous.userData.outlineColor === outlineColor
+        && previous.userData.ghostCopy === isGhost) return;
       const group = createPartMesh(part, def, isGhost ? '#EE5A5A' : color, isGhost ? 0.45 : 1, outlineColor);
       // 选中用更亮描边线宽增强
       group.userData.partId = part.id;
+      group.userData.sourcePart = part;
+      group.userData.outlineColor = outlineColor;
+      group.userData.ghostCopy = isGhost;
+      if (previous) {
+        partsGroup.remove(previous);
+        disposeGroup(previous);
+      }
       partsGroup.add(group);
     });
+    for (const child of existing.values()) {
+      partsGroup.remove(child);
+      disposeGroup(child);
+    }
   }, [parts, selectedIds, hoveredPartId, ghostCopyId]);
 
   // 幽灵预览（点击配件库后，在场景中显示半透明预览）
@@ -2009,14 +1344,16 @@ export default function Scene3D() {
       for (const pi of preset.parts) {
         const pdef = getPartById(pi.partId);
         if (!pdef) continue;
-        const colorList = pdef.category === 'connector' ? CONNECTOR_COLORS : PART_COLORS;
-        const color = colorList.find((c: { id: string }) => c.id === pi.colorId)?.hex || '#CCCCCC';
+        const color = getPartColor(pdef, pi.colorId)?.hex ?? '#CCCCCC';
         const mesh = createPartMesh(pi, pdef, color, 0.4);
         mesh.userData.isGhost = true;
+        mesh.userData.presetPartId = pi.id;
+        if (pi.partId === 'connector-slide-strap') mesh.userData.strapSide = Math.sign(pi.position[0]);
         outer.add(mesh);
       }
       outer.position.set(ghostPos[0], ghostPos[1], ghostPos[2]);
       outer.userData.isGhostGroup = true;
+      if (preset.directPlacement) outer.visible = false;
       ref.scene.add(outer);
       ghostGroupRef.current = outer;
       return;
@@ -2026,8 +1363,7 @@ export default function Scene3D() {
     const def = getPartById(draggingPart.partId);
     if (!def) return;
 
-    const colorList = def.category === 'connector' ? CONNECTOR_COLORS : PART_COLORS;
-    const color = colorList.find((c: { id: string }) => c.id === draggingPart.colorId)?.hex || '#CCCCCC';
+    const color = getPartColor(def, draggingPart.colorId)?.hex ?? '#CCCCCC';
     const ghostPart: PlacedPart = {
       id: 'ghost-preview',
       partId: def.id,
@@ -2036,6 +1372,7 @@ export default function Scene3D() {
       colorId: draggingPart.colorId,
     };
     const ghost = createPartMesh(ghostPart, def, color, 0.4);
+    ghost.visible = false;
     ghost.userData.isGhost = true;
     ref.scene.add(ghost);
     ghostGroupRef.current = ghost;
@@ -2058,9 +1395,8 @@ export default function Scene3D() {
       platGhostGroupRef.current = null;
     }
     platGhostDataRef.current = null;
-    platGhostPartIdRef.current = null;
   }, []);
-  const updatePlatformGhost = useCallback((cursor: THREE.Vector3) => {
+  const updatePlatformGhost = useCallback((ray: THREE.Ray, solidHit?: THREE.Intersection, groundHit?: THREE.Intersection) => {
     const st = useStore.getState();
     const sc = sceneRef.current?.scene;
     if (!sc) return;
@@ -2080,13 +1416,15 @@ export default function Scene3D() {
       clearPlatformGhost();
       return;
     }
-    const fit = findPanelFit(cursor, st.parts);
+    const distance = solidHit?.distance ?? groundHit?.distance;
+    const fit: RoofPanelFit | null = findRoofPanelFit(ray, st.parts, distance)
+      ?? findPanelFit(ray.origin, st.parts, undefined, { ray, maxDistance: distance === undefined ? Infinity : distance + 3 });
     if (!fit) {
       clearPlatformGhost();
       return;
     }
     const platDef = getPartById(fit.partId);
-    if (!platDef || platDef.category !== 'platform' || !platDef.platformSpec) {
+    if (!platDef || platDef.category !== 'platform') {
       clearPlatformGhost();
       return;
     }
@@ -2094,14 +1432,15 @@ export default function Scene3D() {
     const color = colorList.find((c) => c.id === 'mint')?.hex || '#4CAF50';
     // 若幽灵形状（型号+位置+rotation）未变则跳过重建（抖动优化）
     const d = platGhostDataRef.current;
-    if (platGhostGroupRef.current && d && platGhostPartIdRef.current === fit.partId) {
+    if (platGhostGroupRef.current && d?.partId === fit.partId) {
       const same =
         Math.abs(d.position[0] - fit.position[0]) < 0.01 &&
         Math.abs(d.position[1] - fit.position[1]) < 0.01 &&
         Math.abs(d.position[2] - fit.position[2]) < 0.01 &&
         Math.abs(d.rotation[0] - fit.rotation[0]) < 0.01 &&
         Math.abs(d.rotation[1] - fit.rotation[1]) < 0.01 &&
-        Math.abs(d.rotation[2] - fit.rotation[2]) < 0.01;
+        Math.abs(d.rotation[2] - fit.rotation[2]) < 0.01 &&
+        JSON.stringify(d.roofOutline) === JSON.stringify(fit.roofOutline);
       if (same) return;
     }
     if (platGhostGroupRef.current) {
@@ -2115,6 +1454,7 @@ export default function Scene3D() {
       position: fit.position,
       rotation: fit.rotation,
       colorId: 'mint',
+      roofOutline: fit.roofOutline,
     };
     const group = createPartMesh(ghostPart, platDef, color, 0.5, '#4A90D9');
     group.traverse((o) => {
@@ -2132,8 +1472,7 @@ export default function Scene3D() {
     outer.add(group);
     sc.add(outer);
     platGhostGroupRef.current = outer;
-    platGhostDataRef.current = { position: fit.position, rotation: fit.rotation };
-    platGhostPartIdRef.current = fit.partId;
+    platGhostDataRef.current = fit;
   }, [clearPlatformGhost]);
 
   // 端点扩展幽灵：选中单个独立杆件/连接件时，在其空闲扩展端显示半透明待部署元件
@@ -2336,6 +1675,188 @@ export default function Scene3D() {
       return { axes, planes, arcs };
     };
 
+    const handleDirectPlacement = (place: boolean) => {
+      const state = useStore.getState();
+      const preset = state.pendingPreset;
+      if (preset?.id === COMBO_45L.id) {
+        const ray = raycaster.ray;
+        const targets = availablePorts(getWorldConnPoints(state.parts))
+          .filter(port => port.type === 'female' && ray.distanceSqToPoint(port.position) < 9 ** 2)
+          .sort((a, b) => ray.distanceSqToPoint(a.position) - ray.distanceSqToPoint(b.position));
+        const anchor = ports(preset.parts).find(port => port.direction.y < -0.99);
+        const ghost = ghostGroupRef.current;
+        if (anchor) for (const target of targets) {
+          const shift = target.position.clone().sub(anchor.position);
+          const candidate = preset.parts.map(part => ({ ...part, position: new THREE.Vector3(...part.position).add(shift).toArray() }));
+          const fit = fitRoofCombo(candidate, state.parts);
+          if (!fit) continue;
+          if (place) {
+            state.addPresetGroup({ ...preset, parts: fit }, [0, 0, 0]);
+          } else if (ghost) {
+            ghost.visible = true;
+            ghost.rotation.set(...fit[0].rotation);
+            ghost.position.set(...fit[0].position).sub(new THREE.Vector3(...preset.parts[0].position).applyEuler(ghost.rotation));
+          }
+          return true;
+        }
+        if (!place && ghost) ghost.rotation.set(0, 0, 0);
+      }
+      if (preset?.directPlacement === 'bridge-bay') {
+        clearPlatformGhost();
+        const fit = findBridgeFit(raycaster.ray, state.parts);
+        if (place) {
+          if (fit) {
+            state.addPresetGroup({ ...preset, parts: placeAssemblyParts(preset.parts, fit) }, [0, 0, 0]);
+            el.style.cursor = 'default';
+          } else {
+            void message.info({ key: 'bridge-fit', content: '请指向两侧有连续扶手的空框架（宽 40 cm、长 80 cm）。' });
+          }
+        } else {
+          const ghost = ghostGroupRef.current;
+          if (ghost) {
+            ghost.visible = !!fit;
+            if (fit) {
+              ghost.position.copy(fit.position);
+              ghost.rotation.y = fit.yaw;
+            }
+          }
+          el.style.cursor = fit ? 'crosshair' : 'not-allowed';
+        }
+        return true;
+      }
+      if (preset?.directPlacement === 'slide-edge' || preset?.directPlacement === 'ladder-edge') {
+        clearPlatformGhost();
+        const ladder = preset.directPlacement === 'ladder-edge';
+        const joint = ladder ? findLadderJoin(raycaster.ray, state.parts) : null;
+        const fit = joint ?? findSlideFit(raycaster.ray, state.parts, ladder ? 15 : 20);
+        if (place && fit) {
+          if (joint) {
+            state.addPresetGroup({ ...preset, name: '滑梯与爬梯', parts: joint.additions }, [0, 0, 0], joint);
+          } else if ('strapHalfSpacing' in fit) {
+            state.addPresetGroup({ ...preset, parts: placeAssemblyParts(preset.parts, fit) }, [0, 0, 0]);
+          }
+          el.style.cursor = 'default';
+        } else if (place) {
+          void message.info({ key: 'slide-fit', content: ladder ? '请选择水平杆件或双段滑梯的空闲侧边。' : '请选择一根侧面留空的水平杆件。' });
+        } else {
+          const ghost = ghostGroupRef.current;
+          if (ghost) {
+            ghost.visible = !!fit;
+            if (fit) {
+              ghost.position.copy(fit.position);
+              ghost.rotation.y = fit.yaw;
+              for (const member of ghost.children) {
+                member.visible = !joint || joint.previewIds.has(member.userData.presetPartId);
+                if (member.userData.strapSide && 'strapHalfSpacing' in fit) member.position.x = member.userData.strapSide * fit.strapHalfSpacing;
+              }
+            }
+          }
+          el.style.cursor = fit ? 'crosshair' : 'not-allowed';
+        }
+        return true;
+      }
+      const picked = state.draggingPart;
+      const def = picked && getPartById(picked.partId);
+      if (!picked || !def?.directPlacement) return false;
+      clearPlatformGhost();
+      const target = def.directPlacement;
+      const fit = target === 'trampoline-frame' ? findTrampolineFit(raycaster.ray, state.parts, def)
+        : target === 'tall-rainbow-frame' ? findTallRainbowFit(raycaster.ray, state.parts, def)
+          : findMountedAccessoryFit(raycaster.ray, state.parts, def);
+      if (place) {
+        if (fit) {
+          const part = state.addPart(fit.partId, fit.position, fit.rotation, picked.colorId, false, true);
+          state.setDraggingPart(null);
+          if (part) state.setSelection([part.id], part.id);
+          el.style.cursor = 'default';
+        } else {
+          const content = target === 'trampoline-frame' ? '请选择四边闭合、内部空置的 80 × 80 cm 水平框架。'
+            : target === 'tall-rainbow-frame' ? `请指向空的 40 × ${def.platformSpec?.plateDepth} cm 竖向框格。`
+              : target === 'molded-slide' ? `请选择约 ${def.slideSpec?.rise} cm 高、外侧留空的水平长圆管。`
+                : '请选择下方留空且高度足够的水平长圆管。';
+          void message.info({ key: 'special-part-fit', content });
+        }
+      } else {
+        const ghost = ghostGroupRef.current;
+        if (ghost) {
+          ghost.visible = !!fit;
+          if (fit) {
+            ghost.position.set(...fit.position);
+            ghost.rotation.set(...fit.rotation);
+          }
+        }
+        el.style.cursor = fit ? 'crosshair' : 'not-allowed';
+      }
+      return true;
+    };
+
+    const onNativeDrag = (event: DragEvent) => {
+      if (!event.dataTransfer?.types.includes('application/x-climbing-part')) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+      const rect = el.getBoundingClientRect();
+      pointer.set(((event.clientX - rect.left) / rect.width) * 2 - 1, 1 - ((event.clientY - rect.top) / rect.height) * 2);
+      raycaster.setFromCamera(pointer, camera);
+      if (!handleDirectPlacement(event.type === 'drop')) handlePickedPlacement(event.type === 'drop');
+    };
+
+    const handlePickedPlacement = (place: boolean) => {
+      const state = useStore.getState();
+      const picked = state.draggingPart;
+      const def = picked && getPartById(picked.partId);
+      if (!picked || !def) return false;
+      clearPlatformGhost();
+      const ghost = ghostGroupRef.current;
+      if (state.workflow === 'frame' && state.gizmoMode === 'growth' && def.category === 'platform') {
+        if (ghost) ghost.visible = false;
+        if (place) void message.info('切换到「编辑平台板」或「移动配件」后即可放置板件。');
+        return true;
+      }
+      const part: PlacedPart = { id: 'library-preview', partId: def.id, position: [0, 0, 0],
+        rotation: [0, 0, 0], colorId: picked.colorId };
+      const ray = raycaster.ray;
+      const snap = def.extKind === 'rainbow'
+        ? findPanelFit(ray.origin, state.parts, { ray })
+        : def.category === 'platform'
+          ? findPanelFit(ray.origin, state.parts, undefined, { def, ray })
+          : def.id === 'connector-bazi'
+            ? findDoubleClampFit(ray, state.parts)
+            : findPickedPortFit(ray, part, def, state.parts);
+      const groundHit = raycaster.intersectObject(ground)[0];
+      let pose = snap;
+      if (!pose && def.extKind !== 'rainbow' && groundHit && !raycaster.intersectObject(ref.partsGroup, true)
+        .some(hit => hit.object instanceof THREE.Mesh && hit.distance < groundHit.distance - 0.1)) {
+        const { x, z } = groundHit.point;
+        const position: PlacedPart['position'] = [
+          Math.round(x / SNAP_DIST) * SNAP_DIST, def.size.height / 2, Math.round(z / SNAP_DIST) * SNAP_DIST,
+        ];
+        if (!state.checkCollision({ ...part, position })) pose = { position, rotation: part.rotation };
+      }
+      if (place) {
+        if (pose) {
+          const added = state.addPart(def.id, pose.position, pose.rotation, picked.colorId, false, !!snap);
+          if (added) {
+            state.setDraggingPart(null);
+            state.setSelection([added.id], added.id);
+            el.style.cursor = 'default';
+          }
+        } else {
+          void message.info({ key: 'picked-part-fit', content: def.extKind === 'rainbow'
+            ? '请点击一个空的 40 × 40 cm 竖向框格。' : '请指向兼容的连接位置或空地。' });
+        }
+      } else {
+        if (ghost) {
+          ghost.visible = !!pose;
+          if (pose) {
+            ghost.position.set(...pose.position);
+            ghost.rotation.set(...pose.rotation);
+          }
+        }
+        el.style.cursor = snap ? 'crosshair' : pose ? 'copy' : 'not-allowed';
+      }
+      return true;
+    };
+
     const onPointerDown = (e: PointerEvent) => {
       // 仅左键用于选中/拖拽/放置；中键拖拽旋转视角（滚轮缩放），右键平移/上下文菜单
       if (e.button !== 0) return;
@@ -2352,6 +1873,8 @@ export default function Scene3D() {
       pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(pointer, camera);
       let state = useStore.getState();
+
+      if (handleDirectPlacement(true) || handlePickedPlacement(true)) return;
 
       // 旋转预览点击
       if (state.rotationPreviewEnabled) {
@@ -2501,7 +2024,7 @@ export default function Scene3D() {
         if (platHits.length) {
           const st = useStore.getState();
           const md = platGhostDataRef.current;
-          const added = st.addPart(platGhostPartIdRef.current || 'platform-39.5x39.5', md.position, md.rotation, undefined, false, true);
+          const added = st.addPart(md.partId, md.position, md.rotation, undefined, false, true, md.roofOutline);
           if (added) {
             st.setSelection([added.id], added.id);
             window.__debugLog?.(`🟩 平台板自动部署: → 实体 #${st.parts.length}`);
@@ -2614,7 +2137,7 @@ export default function Scene3D() {
       const groundIntersects = raycaster.intersectObject(ground);
       if (groundIntersects.length > 0) {
         const p = groundIntersects[0].point;
-        const gridSize = state.snapEnabled ? SNAP_DIST : 1;
+        const gridSize = SNAP_DIST;
         // 预置模块部署：整组作为一个 solid 实体放置（含成组）
         if (state.pendingPreset) {
           const dropPos: [number, number, number] = [
@@ -2623,91 +2146,29 @@ export default function Scene3D() {
             Math.round(p.z / gridSize) * gridSize,
           ];
           const preset = state.pendingPreset;
-          state.addPresetGroup(preset, dropPos);
-          // 45°L嵌套组合：部署后立即做「结构化刚体吸附」——仅绕世界Y旋转+整体平移，
-          // 保持立杆竖直、斜杆45°仰角，并把闲置 male 端与周边杆件 female 端贴合（与右键替换逻辑统一）。
           if (preset.id === COMBO_45L.id) {
-            const s3 = useStore.getState();
-            const comboIds = s3.selectedIds;
-            if (comboIds.length === 2) {
-              const comboParts = s3.parts.filter((p) => comboIds.includes(p.id));
-              const fixed = snapComboRigid(comboParts);
-              if (fixed) {
-                const updates = fixed.map((p) => ({ id: p.id, position: p.position, rotation: p.rotation }));
-                s3.batchUpdate(updates);
-              }
+            const candidate = preset.parts.map(part => ({ ...part,
+              position: part.position.map((v, i) => v + dropPos[i]) as [number, number, number],
+            }));
+            const fixed = fitRoofCombo(candidate, state.parts);
+            if (!fixed && bodyIntersects(candidate, state.parts)) {
+              alert('此处组合与已有构件穿插，无法放置。请换一个位置或选择空闲杆件端口。');
+              return;
             }
+            state.addPresetGroup({ ...preset, parts: fixed ?? candidate }, [0, 0, 0]);
+          } else {
+            state.addPresetGroup(preset, dropPos);
           }
           window.__debugLog?.(`✅ 已部署模块「${preset.name}」 @ (${dropPos[0]}, ${dropPos[2]})`);
           return;
         }
-        if (state.draggingPart) {
-          const def = getPartById(state.draggingPart.partId);
-          // 增加框架(frame)阶段只允许放置/生长杆件与连接件，禁止平台板、扩展板件等
-          if (state.workflow === 'frame' && def && (def.category !== 'bar' && def.category !== 'connector')) {
-            window.__debugLog?.(`🚫 增加框架阶段仅允许杆件和连接件`);
-            state.setDraggingPart(null);
-            return;
-          }
-          const yOff = def ? def.size.height / 2 : 0;
-          let pos: [number, number, number] = [
-            Math.round(p.x / gridSize) * gridSize,
-            yOff,
-            Math.round(p.z / gridSize) * gridSize,
-          ];
-          let rot: [number, number, number] | undefined = undefined;
-          let snapHit = false;
-
-          // 放置时自动吸附（杆件/连接件）
-          if (def && (def.category === 'bar' || def.category === 'connector')) {
-            const tempPart: PlacedPart = {
-              id: 'ghost',
-              partId: def.id,
-              position: pos,
-              rotation: [0, 0, 0],
-              colorId: state.draggingPart.colorId,
-            };
-            const selfCPs = getSelfWorldConnPoints(tempPart, def);
-            const others = getWorldConnPoints(state.parts);
-            const snap = findBestSnap(selfCPs, others);
-            if (snap) {
-              const snapped = computeSnappedTransform(tempPart, def, snap.selfCp, snap.otherCp);
-              pos = snapped.position;
-              rot = snapped.rotation;
-              snapHit = true;
-              window.__debugLog?.(`🧲 放置吸附: ${snap.selfCp.cpId} → ${snap.otherCp.cpId}`);
-            }
-          } else if (def && def.category === 'platform') {
-            // 平台板放置吸附
-            const tempPart: PlacedPart = {
-              id: 'ghost',
-              partId: def.id,
-              position: pos,
-              rotation: [0, 0, 0],
-              colorId: state.draggingPart.colorId,
-            };
-            const snap = findPlatformSnap(tempPart, def, state.parts);
-            if (snap) {
-              pos = snap.position;
-              rot = snap.rotation;
-              snapHit = true;
-            }
-          }
-
-          state.addPart(state.draggingPart.partId, pos, rot, state.draggingPart.colorId, false, snapHit);
-          window.__debugLog?.(`✅ 已放置元件: ${state.draggingPart.partId} @ (${pos[0].toFixed(1)}, ${pos[1].toFixed(1)}, ${pos[2].toFixed(1)})`);
-          state.setDraggingPart(null);
-          return;
-        }
-      } else if (state.draggingPart) {
-        window.__debugLog?.('⚠️ 点击未命中地面，无法放置元件');
       }
 
       // 空白处按下：开始框选（记录起点；拖拽后松开时判定，单点则为取消选中）
       ds.isSelecting = true;
       ds.selOrigin = { x: e.clientX, y: e.clientY };
-      ds.selCur = { x: e.clientX, y: e.clientY };
       controls.enabled = false;
+      el.setPointerCapture(e.pointerId);
       updateSelectionRect(e.clientX, e.clientY, e.clientX, e.clientY);
     };
 
@@ -2782,18 +2243,15 @@ export default function Scene3D() {
       raycaster.setFromCamera(pointer, camera);
       const state = useStore.getState();
 
+      if (handleDirectPlacement(false) || handlePickedPlacement(false)) return;
+
       // 生长模式：光标附近存在可落平台的矩形框架时，更新平台板幽灵（仅“增加配件”阶段）
       if (state.gizmoMode === 'growth' && !dragState.current.isDown && state.workflow === 'accessory') {
         const am: THREE.Mesh[] = [];
         ref.partsGroup.children.forEach((g) => g.children.forEach((c: THREE.Object3D) => { if (c instanceof THREE.Mesh) am.push(c); }));
         const mh = raycaster.intersectObjects(am);
-        if (mh.length) {
-          updatePlatformGhost(mh[0].point);
-        } else {
-          const gInt = raycaster.intersectObject(ground);
-          if (gInt.length) updatePlatformGhost(gInt[0].point);
-          else clearPlatformGhost();
-        }
+        const groundHit = mh.length ? undefined : raycaster.intersectObject(ground)[0];
+        updatePlatformGhost(raycaster.ray, mh[0], groundHit);
       }
 
       // 悬停检测：gizmo手柄
@@ -2834,7 +2292,6 @@ export default function Scene3D() {
       // 框选拖拽中
       if (ds.isSelecting && ds.selOrigin) {
         updateSelectionRect(ds.selOrigin.x, ds.selOrigin.y, e.clientX, e.clientY);
-        ds.selCur = { x: e.clientX, y: e.clientY };
         return;
       }
 
@@ -2991,7 +2448,6 @@ export default function Scene3D() {
                 }
                 const rs = ds.rigidSnap;
                 st = useStore.getState();
-                const g = st.snapEnabled ? SNAP_DIST : 1;
                 // 自由拖拽（非操作轴/平面）时保持组的高度不变，只沿地面移动，避免抓起顶部驱动件导致整体骤升骤降
                 const keepY = !ds.axisDir && !ds.planeNormal;
                 const raw: [number, number, number] = [
@@ -3000,11 +2456,7 @@ export default function Scene3D() {
                   newPos[2] - rs.driverStart[2],
                 ];
                 // 组整体网格吸附（对位移取整），所有成员共享同一位移 → 完美刚体
-                const dd: [number, number, number] = [
-                  Math.round(raw[0] / g) * g,
-                  keepY ? 0 : raw[1],
-                  Math.round(raw[2] / g) * g,
-                ];
+                const dd: [number, number, number] = [raw[0], keepY ? 0 : raw[1], raw[2]];
                 // 绝对位置 = 起始位置 + 统一位移（含驱动件本身，一步原子更新全部成员）
                 const updates = rs.members.map((m) => ({
                   id: m.id,
@@ -3017,6 +2469,27 @@ export default function Scene3D() {
                     return old ? { ...old, position: u.position } : null;
                   })
                   .filter((v): v is PlacedPart => v !== null);
+                let snapped = false;
+                {
+                  const ownIds = new Set(memberIds);
+                  const ownPorts = availablePorts(getWorldConnPoints(applied));
+                  const externalPorts = availablePorts(getWorldConnPoints(st.parts.filter(p => !ownIds.has(p.id))));
+                  const match = findBestSnap(ownPorts, externalPorts);
+                  if (match) {
+                    const delta = match.otherCp.position.clone().sub(match.selfCp.position);
+                    // Axis and plane handles retain their movement constraints.
+                    const permitted = ds.axisDir ? delta.clone().projectOnVector(ds.axisDir)
+                      : ds.planeNormal ? delta.clone().projectOnPlane(ds.planeNormal)
+                      : new THREE.Vector3(delta.x, 0, delta.z);
+                    if (delta.distanceTo(permitted) < 0.15) {
+                      updates.forEach(u => {
+                        u.position = [u.position[0] + delta.x, u.position[1] + delta.y, u.position[2] + delta.z];
+                      });
+                      applied.forEach(p => { p.position = [p.position[0] + delta.x, p.position[1] + delta.y, p.position[2] + delta.z]; });
+                      snapped = true;
+                    }
+                  }
+                }
                 const grpBox = getSelAABB(applied);
                 let lift = 0;
                 if (grpBox && grpBox.min.y < 0) lift = -grpBox.min.y;
@@ -3025,7 +2498,8 @@ export default function Scene3D() {
                   position: [u.position[0], u.position[1] + lift, u.position[2]] as [number, number, number],
                 }));
                 st.batchUpdate(finalUpdates);
-                ds.snapped = false;
+                ds.snapped = snapped && lift === 0;
+                setSnapFeedback(ds.snapped);
                 window.__debugLog?.(`👥 成组移动(刚体): ${memberIds.length} 个成员`);
               } else {
                 const def = getPartById(part.partId);
@@ -3033,22 +2507,25 @@ export default function Scene3D() {
                 if (ds.ghostActive) {
                   state.updatePartPosition(ds.dragPartId, newPos, true);
                   ds.snapped = false;
+                  setSnapFeedback(false);
                   updateGhostHighlight(useStore.getState(), ds);
                 } else if (def && (def.category === 'bar' || def.category === 'connector')) {
                   // 临时构造一个"待吸附"的 PlacedPart
                   const tempPart: PlacedPart = { ...part, position: newPos };
                   const selfCPs = getSelfWorldConnPoints(tempPart, def);
                   const others = getWorldConnPoints(state.parts, part.id);
-                  const snap = findBestSnap(selfCPs, others);
+                  const snap = findBestSnap(selfCPs, availablePorts(others), SNAP_CONNECT_DIST, 35);
                   if (snap) {
                     const snapped = computeSnappedTransform(tempPart, def, snap.selfCp, snap.otherCp);
                     state.updatePartPosition(ds.dragPartId, snapped.position, true);
                     state.updatePartRotation(ds.dragPartId, snapped.rotation);
                     ds.snapped = true;
+                    setSnapFeedback(true);
                     window.__debugLog?.(`🧲 自动吸附: ${snap.selfCp.cpId} → ${snap.otherCp.cpId} d=${snap.dist.toFixed(1)}`);
                   } else {
                     state.updatePartPosition(ds.dragPartId, newPos, false);
                     ds.snapped = false;
+                    setSnapFeedback(false);
                   }
                 } else if (def && def.category === 'platform') {
                   // 平台板实时吸附（矩形框架）
@@ -3058,10 +2535,12 @@ export default function Scene3D() {
                     state.updatePartPosition(ds.dragPartId, snap.position, true);
                     state.updatePartRotation(ds.dragPartId, snap.rotation);
                     ds.snapped = true;
+                    setSnapFeedback(true);
                     window.__debugLog?.(`🧲 平台板吸附框架`);
                   } else {
                     state.updatePartPosition(ds.dragPartId, newPos, false);
                     ds.snapped = false;
+                    setSnapFeedback(false);
                   }
                 } else {
                   state.updatePartPosition(ds.dragPartId, newPos, false);
@@ -3086,7 +2565,7 @@ export default function Scene3D() {
       }
     };
 
-    const onPointerUp = () => {
+    const onPointerUp = (event: PointerEvent) => {
       // 视角导航模式：结束时恢复悬停光标，场景逻辑不参与（未进入场景拖拽）
       const vm = useStore.getState().navMode;
       if (vm !== 'none') {
@@ -3096,15 +2575,15 @@ export default function Scene3D() {
 
       // 结束框选
       if (ds.isSelecting && ds.selOrigin) {
-        const x1 = ds.selOrigin.x, y1 = ds.selOrigin.y, x2 = ds.selCur?.x ?? x1, y2 = ds.selCur?.y ?? y1;
-        updateSelectionRect(x1, y1, x2, y2);
+        const { x: x1, y: y1 } = ds.selOrigin;
+        const { clientX: x2, clientY: y2 } = event;
         const el = selectionRectRef.current;
         if (el) el.style.display = 'none';
         // 判断框选方向：左上→右下（正向）要求完全包含，反之要求部分相交
         const fwd = x2 >= x1 && y2 >= y1;
         const selIds: string[] = [];
         const curParts = state.parts;
-        for (const p of curParts) {
+        for (const p of (Math.abs(x2 - x1) >= 3 || Math.abs(y2 - y1) >= 3) ? curParts : []) {
           const def = getPartById(p.partId);
           if (!def) continue;
           const aabb = partWorldAABB(p);
@@ -3130,7 +2609,6 @@ export default function Scene3D() {
         }
         ds.isSelecting = false;
         ds.selOrigin = null;
-        ds.selCur = null;
         controls.enabled = true;
         ds.isDown = false;
         return;
@@ -3139,7 +2617,7 @@ export default function Scene3D() {
       if (ds.isDragging && ds.dragPartId) {
         // 已吸附嵌套时保持精确连接位置，不再做网格吸附
         const part = state.parts.find((p: PlacedPart) => p.id === ds.dragPartId);
-        if (part && state.snapEnabled && !ds.snapped) {
+        if (part && !ds.snapped && !ds.rigidSnap) {
           const gridSize = SNAP_DIST;
           const snappedPos: [number, number, number] = [
             Math.round(part.position[0] / gridSize) * gridSize,
@@ -3170,6 +2648,7 @@ export default function Scene3D() {
         ds.anchorCopyId = null;
       }
       controls.enabled = true;
+      setSnapFeedback(false);
       ds.isDown = false;
       ds.isDragging = false;
       ds.dragPartId = null;
@@ -3185,7 +2664,6 @@ export default function Scene3D() {
       ds.snapped = false;
       ds.isSelecting = false;
       ds.selOrigin = null;
-      ds.selCur = null;
       // 拖动结束后触发扩展幽灵重建（ref 状态不发生响应式变化，需显式 bump）
       useStore.getState().bumpRelease();
     };
@@ -3231,12 +2709,25 @@ export default function Scene3D() {
       window.__sceneCtxMenu?.({ x: e.clientX, y: e.clientY, ids: [...menuIds] });
     };
     container.addEventListener('contextmenu', onContextMenu);
+    const cancelSelection = () => {
+      if (!ds.isSelecting) return;
+      ds.isSelecting = false;
+      ds.selOrigin = null;
+      controls.enabled = true;
+      if (selectionRectRef.current) selectionRectRef.current.style.display = 'none';
+    };
+    container.addEventListener('pointercancel', cancelSelection);
+    container.addEventListener('dragover', onNativeDrag);
+    container.addEventListener('drop', onNativeDrag);
 
     return () => {
       container.removeEventListener('pointerdown', onPointerDown);
       container.removeEventListener('pointermove', onPointerMove);
       container.removeEventListener('pointerup', onPointerUp);
       container.removeEventListener('contextmenu', onContextMenu);
+      container.removeEventListener('pointercancel', cancelSelection);
+      container.removeEventListener('dragover', onNativeDrag);
+      container.removeEventListener('drop', onNativeDrag);
       if (platGhostGroupRef.current) {
         ref.scene.remove(platGhostGroupRef.current);
         disposeGroup(platGhostGroupRef.current);
@@ -3287,6 +2778,21 @@ export default function Scene3D() {
   return (
     <div className="relative w-full h-full">
       <div ref={containerRef} className="w-full h-full" />
+      {viewportState !== 'ready' && (
+        <div className="absolute inset-0 z-[30] grid place-items-center bg-[#f0f4f6]/90">
+          <div className="flex flex-col items-center gap-3 rounded-xl bg-white px-6 py-4 text-sm text-slate-700 shadow-md" role="status">
+            {viewportState === 'recovering' ? '3D 视窗正在恢复，当前模型已保留。' : '3D 视窗未能恢复，当前模型已保留。'}
+            <button type="button" className="rounded-md bg-[#17629c] px-3 py-1.5 text-white" onClick={() => retryViewportRef.current?.()}>
+              重试 3D 视窗
+            </button>
+          </div>
+        </div>
+      )}
+      {snapFeedback && (
+        <div className="pointer-events-none absolute bottom-4 left-1/2 z-20 -translate-x-1/2 rounded-full bg-[#17455c] px-4 py-2 text-xs font-semibold text-white shadow-lg" role="status">
+          ✓ 已吸附到连接位置
+        </div>
+      )}
       {/* 端点扩展提示：可用扩展点计数 / 成组元件解组提示 */}
       <div className="pointer-events-none absolute left-1/2 top-3 z-20 flex -translate-x-1/2 flex-col items-center gap-1">
         {extCount > 0 && (
@@ -3303,8 +2809,9 @@ export default function Scene3D() {
       {/* 框选矩形 */}
       <div
         ref={selectionRectRef}
-        className="pointer-events-none fixed z-20 border-2 border-[#4A90D9] bg-[#4A90D9]/15"
-        style={{ display: 'none', position: 'fixed' }}
+        data-testid="scene-selection-box"
+        className="pointer-events-none absolute z-20 border-2 border-[#4A90D9] bg-[#4A90D9]/15"
+        style={{ display: 'none' }}
       />
       {/* 右键菜单 */}
       {ctxMenu && (
@@ -3320,9 +2827,10 @@ export default function Scene3D() {
               const p = parts.find((x) => x.id === (ctxMenu.ids[0] || ''));
               if (!p) return 0;
               const d = getPartById(p.partId);
-              if (!d) return 0;
+              if (!d || d.directPlacement || (d.category === 'connector' && !d.connectionPoints?.length) || (d.category === 'platform' && !d.platformSpec)) return 0;
               return PARTS_LIBRARY.filter((x) => x.category === d.category && x.id !== d.id &&
-                (x.id !== 'connector-45deg-nest')).length;
+                x.id !== 'connector-45deg-nest' && !x.directPlacement && (x.category !== 'connector' || x.connectionPoints?.length)
+                && (x.category !== 'platform' || x.platformSpec)).length;
             })();
             const estH = 46 + siblingCount * 28 + 102;
             let left = ctxMenu.x;
@@ -3342,8 +2850,11 @@ export default function Scene3D() {
               const d = getPartById(p.partId);
               if (!d) return null;
               const palette = d.colors || (d.category === 'connector' ? CONNECTOR_COLORS : PART_COLORS);
-              const siblings = PARTS_LIBRARY.filter(
+              const siblings = d.directPlacement || (d.category === 'connector' && !d.connectionPoints?.length)
+                || (d.category === 'platform' && !d.platformSpec) ? [] : PARTS_LIBRARY.filter(
                   (x) => x.category === d.category && x.id !== d.id && x.id !== 'connector-45deg-nest'
+                    && !x.directPlacement && (x.category !== 'connector' || x.connectionPoints?.length)
+                    && (x.category !== 'platform' || x.platformSpec)
                 );
               return { part: p, def: d, palette, siblings, isPlatform: d.category === 'platform', isStorbox: d.extKind === 'storbox' };
             })();
@@ -3368,35 +2879,30 @@ export default function Scene3D() {
                     />
                   ))}
                 </div>
-                {menuPrimary.def.category === 'connector' && (
+                {menuPrimary.def.connectorSpec && (
                   <button
                     onClick={() => {
                       const st = useStore.getState();
                       const cur = menuPrimary.part;
-                      // 用 45°L嵌套组合（两件）原地替换当前选中连接件：以当前件位置为锚点，删旧件后部署组合
-                      // 组合两件相对锚点 x∈[-(组合半宽), +(3.2-COMBO_NEST_K)]、y∈[0,3.2]：dropPos 需减去组合件内置 y 偏移(3.2)，
-                      // 否则组合整体被抬高 3.2cm、悬空无法与杆件对接。
-                      // 组合水平几何中心 x = (0 + (5-COMBO_NEST_K))/2 = 2.5 - COMBO_NEST_K/2，据此动态锚定。
-                      const cmbY = COMBO_45L.parts[0].position[1];
-                      const cmbCx =
-                        (COMBO_45L.parts[0].position[0] + COMBO_45L.parts[1].position[0]) / 2;
-                      st.removePart(cur.id);
-                      st.addPresetGroup(
-                        { id: COMBO_45L.id, name: COMBO_45L.name, parts: COMBO_45L.parts },
-                        [cur.position[0] - cmbCx, cur.position[1] - cmbY, cur.position[2]]
-                      );
-                      // 组合整体刚体吸附（旋转+平移）：让 45度件或L形件的闲置端与相近杆件正确嵌套，
-                      // 尽量让多个闲置端同时对接周边杆件，修正组合方向。
-                      const s2 = useStore.getState();
-                      const comboIds = s2.selectedIds;
-                      if (comboIds.length === 2) {
-                        const comboParts = s2.parts.filter((p) => comboIds.includes(p.id));
-                        const fixed = snapComboRigid(comboParts);
-                        if (fixed) {
-                          const updates = fixed.map((p) => ({ id: p.id, position: p.position, rotation: p.rotation }));
-                          s2.batchUpdate(updates);
-                        }
+                      const fixed = fitRoofCombo(COMBO_45L.parts, st.parts, cur);
+                      if (!fixed) {
+                        alert('此处无法放置45°L组合：无法保留已有杆件连接，或组合会与现有构件穿插。请在屋顶檐口的立杆/斜杆端部使用。');
+                        setCtxMenu(null);
+                        return;
                       }
+                      // Solve before mutation; replacement and grouping form one undo step.
+                      st._pushHistory();
+                      const inserted = fixed.map(p => ({ ...p, id: crypto.randomUUID() }));
+                      const groupId = crypto.randomUUID();
+                      const groups = st.groups.map(g => ({ ...g,
+                        memberIds: g.memberIds.filter(id => id !== cur.id),
+                        childGroupIds: g.memberIds.includes(cur.id) ? [...g.childGroupIds, groupId] : g.childGroupIds,
+                      }));
+                      useStore.setState({
+                        parts: [...st.parts.filter(p => p.id !== cur.id), ...inserted],
+                        groups: [...groups, { id: groupId, name: COMBO_45L.name, memberIds: inserted.map(p => p.id), childGroupIds: [] }],
+                        selectedIds: inserted.map(p => p.id), selectedPartId: inserted[0].id,
+                      });
                       setCtxMenu(null);
                     }}
                     className="block w-full px-3 py-1 text-left text-[13px] font-medium text-[#26C281] hover:bg-[#F0F4FA]"
@@ -3407,9 +2913,21 @@ export default function Scene3D() {
                 {menuPrimary.siblings.length > 0 && (
                   <>
                     <div className="px-3 pb-0.5 pt-1 text-[11px] text-[#999]">替换为同类型</div>
-                    {menuPrimary.siblings.map((sib) => (
-                      <button
+                    {menuPrimary.siblings.map((sib) => {
+                      const color = getPartColor(sib, menuPrimary.part.colorId)
+                        ?? getPartColor(sib, sib.defaultColor);
+                      return (
+                      <Popover
                         key={sib.id}
+                        placement="right"
+                        trigger={['hover', 'focus']}
+                        mouseEnterDelay={0.18}
+                        destroyOnHidden
+                        title={sib.name}
+                        content={<div className="w-40"><PartThumbnail part={sib} color={color?.hex ?? '#9CA3AF'} /></div>}
+                      >
+                      <button
+                        type="button"
                         onClick={() => {
                           const st = useStore.getState();
                           st.replacePart(menuPrimary.part.id, sib.id);
@@ -3420,7 +2938,8 @@ export default function Scene3D() {
                       >
                         {sib.name}
                       </button>
-                    ))}
+                      </Popover>
+                    ); })}
                   </>
                 )}
                 {menuPrimary.def.category === 'bar' && (
@@ -3441,7 +2960,7 @@ export default function Scene3D() {
                 {menuPrimary.isPlatform && (
                   <>
                     <div className="px-3 pb-0.5 pt-1 text-[11px] text-[#999]">配件编辑</div>
-                    {!menuPrimary.isStorbox && (
+                    {!menuPrimary.isStorbox && !menuPrimary.def.directPlacement && menuPrimary.def.platformSpec && (
                       <button
                         onClick={() => {
                           const st = useStore.getState();
@@ -3549,6 +3068,87 @@ export default function Scene3D() {
           </button>
         </div>
       )}
+      {!ctxMenu && !paintColor && !pendingPreset && selectedIds.length > 0 && (() => {
+        const nestedCombo = groups.find(group => group.childGroupIds.length === 0
+          && group.memberIds.length === 2
+          && selectedIds.every(id => group.memberIds.includes(id))
+          && parts.some(part => group.memberIds.includes(part.id) && part.partId === 'connector-l')
+          && parts.some(part => group.memberIds.includes(part.id) && part.partId === 'connector-45deg-nest'));
+        const ids = new Set(nestedCombo?.memberIds ?? collectSelectionIds(groups, selectedIds));
+        const selection = parts.filter(part => ids.has(part.id));
+        if (!selection.length) return null;
+        const board = selection.length === 1 ? getPartById(selection[0].partId) : undefined;
+        const hasPlatform = selection.some(part => getPartById(part.partId)?.category === 'platform');
+        const mirror = board?.category === 'platform' && !!board.platformSpec && !board.directPlacement && board.extKind !== 'storbox';
+        if (hasPlatform && !mirror) return null;
+        const elbow = selection.find(part => part.partId === 'connector-l');
+        const slope = selection.length === 2 && elbow
+          ? ports(selection).find(port => port.cpId === 'up45' && selection.some(part => part.id === port.partId && part.partId === 'connector-45deg-nest'))
+          : undefined;
+        const pivot = selection.length === 1 ? new THREE.Vector3(...selection[0].position) : getSelAABB(selection)?.getCenter(new THREE.Vector3());
+        if (!pivot) return null;
+        const anchor = slope && elbow ? new THREE.Vector3(...elbow.position).add(new THREE.Vector3(0, 2.5, 0)) : pivot;
+        const wheelBar = selection.length === 1 && board?.extKind === 'wheelbar';
+        const label = mirror ? '镜像平台板' : slope ? '绕立杆旋转 45°' : wheelBar ? '绕杆轴旋转 45°' : '绕竖直轴旋转 45°';
+        return (
+          <button
+            ref={element => { rotateControl.current = element ? { element, anchor } : null; }}
+            type="button"
+            className="designer-rotate-step"
+            title={label}
+            aria-label={label}
+            onClick={event => {
+              const state = useStore.getState();
+              const current = state.parts.filter(part => ids.has(part.id));
+              if (current.length !== selection.length) return;
+              let updates: PlacedPart[];
+              if (mirror) {
+                const transform = mirrorPlatformTransform(current[0], board, state.parts);
+                if (!transform) {
+                  void message.info({ key: 'platform-mirror', content: '未检测到该板件所在的矩形框架，无法镜像。' });
+                  return;
+                }
+                updates = [{ ...current[0], ...transform }];
+              } else if (slope) {
+                const currentSlope = ports(current).find(port => port.partId === slope.partId && port.cpId === slope.cpId)!;
+                const heading = Math.atan2(currentSlope.direction.z, currentSlope.direction.x);
+                const result = orientRoofCombo(current, state.parts, heading + Math.PI / 4);
+                if (!result.parts) {
+                  void message.warning({ key: 'roof-rotation', content: result.error });
+                  return;
+                }
+                updates = result.parts;
+              } else if (wheelBar) {
+                const part = current[0];
+                const orientation = new THREE.Quaternion().setFromEuler(new THREE.Euler(...part.rotation));
+                // Local X is the centerline between the two tube ports.
+                orientation.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI / 4));
+                const rotation = new THREE.Euler().setFromQuaternion(orientation);
+                updates = [{ ...part, rotation: [rotation.x, rotation.y, rotation.z] }];
+              } else {
+                const turn = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -Math.PI / 4);
+                updates = current.map(part => {
+                  const position = new THREE.Vector3(...part.position).sub(pivot).applyQuaternion(turn).add(pivot);
+                  const rotation = new THREE.Euler().setFromQuaternion(turn.clone().multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(...part.rotation))));
+                  return { ...part, position: position.toArray() as [number, number, number], rotation: [rotation.x, rotation.y, rotation.z] };
+                });
+              }
+              state._pushHistory();
+              const byId = new Map(updates.map(part => [part.id, part]));
+              useStore.setState({ parts: state.parts.map(part => byId.get(part.id) ?? part) });
+              if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+                const icon = event.currentTarget.querySelector('svg');
+                icon?.getAnimations().forEach(animation => animation.cancel());
+                const transform = mirror ? 'scaleX(-1)' : 'rotate(-42deg)';
+                icon?.animate([{ transform }, { transform: 'none' }], { duration: 240, easing: 'cubic-bezier(.15,.85,.25,1)' });
+              }
+            }}
+          >
+            {mirror ? <FlipHorizontal2 size={17} aria-hidden="true" /> : <RotateCw size={17} aria-hidden="true" />}
+            <span>{mirror ? '镜像' : '转 45°'}</span>
+          </button>
+        );
+      })()}
       {/* 操作轴旁的"组信息"标签：把成组物体视为一个全新物件，可查看/重命名组、快捷取消成组 */}
       {tagGroupId && (() => {
         const g = groups.find((x) => x.id === tagGroupId);
@@ -3604,14 +3204,20 @@ export default function Scene3D() {
 }
 
 function disposeGroup(obj: THREE.Object3D) {
+  const geometries = new Set<THREE.BufferGeometry>();
+  const materials = new Set<THREE.Material>();
+  const textures = new Set<THREE.Texture>();
   obj.traverse((child) => {
-    if (child instanceof THREE.Mesh) {
-      child.geometry?.dispose();
-      if (Array.isArray(child.material)) {
-        child.material.forEach((m) => m.dispose());
-      } else {
-        child.material?.dispose();
-      }
+    if (child instanceof THREE.Mesh || child instanceof THREE.Line) {
+      geometries.add(child.geometry);
+      const list = Array.isArray(child.material) ? child.material : [child.material];
+      list.forEach(material => materials.add(material));
     }
   });
+  for (const material of materials) {
+    if (material instanceof THREE.MeshStandardMaterial && material.map) textures.add(material.map);
+    material.dispose();
+  }
+  for (const texture of textures) texture.dispose();
+  for (const geometry of geometries) geometry.dispose();
 }

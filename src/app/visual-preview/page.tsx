@@ -31,7 +31,7 @@ import {
   Search,
   X,
 } from 'lucide-react';
-import { PART_COLORS } from '@/data/parts';
+import { DEFAULT_FRAME_COLOR, PART_COLORS } from '@/data/parts';
 import { PREVIEW_PARTS, usePartThumbnails } from './PreviewScene';
 import type { PreviewSettings, ViewCommand } from './PreviewScene';
 import styles from './preview.module.css';
@@ -39,13 +39,10 @@ import styles from './preview.module.css';
 const Scene = dynamic(() => import('./PreviewScene'), { ssr: false });
 const MODES = [
   { label: '生成框架', icon: Cuboid },
-  { label: '增加框架', icon: Layers3 },
-  { label: '增加配件', icon: Box },
+  { label: '编辑框架', icon: Layers3 },
+  { label: '编辑平台板', icon: Box },
   { label: '移动配件', icon: Move },
 ];
-const COLORS = PART_COLORS.filter((color) =>
-  ['olive', 'blue', 'orange', 'mint', 'white'].includes(color.id),
-);
 const TABS = [
   { label: '配件库', icon: LayoutGrid },
   { label: '基本模块', icon: Layers3 },
@@ -58,7 +55,7 @@ export default function VisualPreview() {
     layers: 2,
     columns: 2,
     depth: 2,
-    color: '#6B7F4A',
+    color: DEFAULT_FRAME_COLOR.hex,
     grid: true,
     pan: false,
   });
@@ -497,11 +494,11 @@ export default function VisualPreview() {
             <div>
               <strong>试试不同的配色</strong>
               <span>
-                {COLORS.find((color) => color.hex === settings.color)?.name}
+                {PART_COLORS.find((color) => color.hex === settings.color)?.name}
               </span>
             </div>
             <div className={styles.swatches}>
-              {COLORS.map((color) => (
+              {PART_COLORS.map((color) => (
                 <button
                   key={color.id}
                   aria-label={`模型配色：${color.name}`}

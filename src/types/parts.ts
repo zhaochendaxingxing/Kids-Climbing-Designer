@@ -56,6 +56,8 @@ export interface PartDefinition {
   // 扩展配件标记（扩展杆件/扩展板件）：category 复用 bar/platform，用 extension 区分，extKind 细分渲染类型
   extension?: boolean;
   extKind?: string;
+  directPlacement?: 'trampoline-frame' | 'hanging-bar' | 'tall-rainbow-frame' | 'molded-slide';
+  slideSpec?: { rise: number; run: number; innerWidth: number };
 }
 
 export interface ConnectionPoint {
@@ -75,6 +77,7 @@ export interface PlacedPart {
   rotation: [number, number, number]; // 欧拉角 (弧度)
   colorId: string;         // 当前颜色ID
   scale?: [number, number, number];
+  roofOutline?: [[number, number], [number, number], [number, number]]; // local XZ in cm
   parentId?: string;       // 所属组ID（成组后设置）
 }
 
@@ -91,7 +94,9 @@ export interface PresetUnit {
   category: string;
   description: string;
   thumbnail?: string;
+  directPlacement?: 'slide-edge' | 'ladder-edge' | 'bridge-bay';
   parts: PlacedPart[];     // 相对坐标
+  subgroups?: Pick<SceneGroup, 'name' | 'memberIds'>[];
 }
 
 export interface DesignProject {
@@ -110,16 +115,16 @@ export interface PartDiffItem {
   oldCount: number;
   newCount: number;
   change: number;
+  colors: { colorId: string; oldCount: number; newCount: number }[];
   type: 'added' | 'removed' | 'changed';
 }
 
 export interface DesignDiff {
+  beforeName: string;
+  afterName: string;
   addedParts: PartDiffItem[];
   removedParts: PartDiffItem[];
   changedParts: PartDiffItem[];
-  totalAdded: number;
-  totalRemoved: number;
-  totalChanged: number;
 }
 
 export type ViewMode = 'normal' | 'diff';

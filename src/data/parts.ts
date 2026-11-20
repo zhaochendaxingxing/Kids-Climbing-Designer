@@ -1,18 +1,32 @@
 import type { PartDefinition, PartCategory, PresetUnit } from '@/types/parts';
 
+export const DEFAULT_FRAME_COLOR = { id: 'pine', name: '深绿', hex: '#478977' };
+
 // 颜色调色板（杆件、平台板可选色）
 export const PART_COLORS = [
-  { id: 'mint', name: '浅绿色', hex: '#A8E6CF' },
-  { id: 'olive', name: '橄榄绿', hex: '#6B7F4A' },
-  { id: 'blue', name: '天空蓝', hex: '#4A90D9' },
-  { id: 'green', name: '草地绿', hex: '#6BCB77' },
-  { id: 'orange', name: '阳光橙', hex: '#FF9F43' },
-  { id: 'pink', name: '樱花粉', hex: '#FFB6C1' },
-  { id: 'purple', name: '薰衣草紫', hex: '#B19CD9' },
-  { id: 'red', name: '草莓红', hex: '#EE5A5A' },
-  { id: 'yellow', name: '柠檬黄', hex: '#F7CA45' },
-  { id: 'white', name: '象牙白', hex: '#F5F5F0' },
+  { id: 'mint', name: '浅绿', hex: '#B6D3AE' },
+  DEFAULT_FRAME_COLOR,
+  { id: 'green', name: '草绿', hex: '#0E9B70' },
+  { id: 'red', name: '红色', hex: '#FD362E' },
+  { id: 'white', name: '白色', hex: '#D9DCD9' },
+  { id: 'deep-blue', name: '深蓝', hex: '#3C7BB5' },
+  { id: 'light-blue', name: '浅蓝', hex: '#A3DDFE' },
+  { id: 'blue', name: '天蓝', hex: '#2B8BDF' },
+  { id: 'graphite', name: '灰色', hex: '#656D68' },
+  { id: 'purple', name: '紫色', hex: '#915D85' },
+  { id: 'pink', name: '粉红', hex: '#FAB6CD' },
+  { id: 'yellow', name: '黄色', hex: '#F8E243' },
 ];
+
+const LEGACY_PART_COLORS = [
+  { id: 'olive', name: '橄榄绿', hex: '#6B7F4A' },
+  { id: 'orange', name: '阳光橙', hex: '#FF9F43' },
+];
+
+export function getPartColor(part: PartDefinition, colorId: string) {
+  return part.colors.find(color => color.id === colorId)
+    ?? (part.category !== 'connector' ? LEGACY_PART_COLORS.find(color => color.id === colorId) : undefined);
+}
 
 // 连接件固定为黑色
 export const CONNECTOR_COLORS = [
@@ -31,6 +45,8 @@ export const CATEGORY_CONFIG: Record<PartCategory, { name: string; icon: string;
 const BAR_INNER_DIAMETER = 4;
 const BAR_WALL_THICKNESS = 0.2;
 const BAR_OUTER_DIAMETER = BAR_INNER_DIAMETER + BAR_WALL_THICKNESS * 2; // 4.4
+export const SLIDE_STRAP_RAIL_SPACING = 5.5;
+const SLIDE_STRAP_OUTER_DIAMETER = BAR_OUTER_DIAMETER + 0.4;
 
 // 连接件：连接头（套管）外径 4cm（刚好能塞入杆件内径），壁厚 0.2cm
 const SOCKET_DIAMETER = 4;
@@ -45,12 +61,15 @@ export const NEST_SOCKET_OUTER_DIAMETER = SOCKET_DIAMETER + NEST_SOCKET_WALL * 2
 export const NEST_SOCKET_INNER_DIAMETER = SOCKET_DIAMETER; // 4
 // 45度件 斜向嵌套套筒（female，接杆件）轴向长度：末端 5cm（工程图黄色方框段）
 export const NEST_SOCKET_LENGTH = 5;
+export const NEST_COMBO_SOCKET_LENGTH = 6.819805523;
+export const NEST_SLOPE_SHOULDER = 7.5;
 
 // 中心球直径（比杆件外径大一点，视觉上有凸起）
 const CENTER_DIAMETER = 5;
 
 // 平台板：板厚 2mm = 0.2cm，折边高 2cm
-const PLATE_THICKNESS = 0.2;
+export const PLATE_THICKNESS = 0.2;
+export const ROOF_PANEL_ID = 'platform-roof-triangle';
 const RIM_HEIGHT = 2;   // 折边高度
 const RIM_THICKNESS = 0.4; // 折边厚度
 
@@ -70,16 +89,9 @@ const D45_NEG: [number, number, number] = [-Math.SQRT1_2, Math.SQRT1_2, 0];
 // 套管的 4cm 插入长度是伸进杆件内孔深处的，不是贴合面
 const CONN_POINT_DIST = CENTER_DIAMETER / 2; // 2.5
 
-// ===== 45°L嵌套组合之"嵌套贴合深度"（cm）=====
-// 45度件(connector-45deg-nest) 的 x+ female 大套筒端 与 L两通(connector-l) 的 x+ male 端相互嵌套的深度。
-// 它决定组合件内两球的水平贴合点位置，进而决定组合的横向跨度（W1）。
-// W2 基准：一个 35cm 水平杆件 + 2 个 L 形连接件刚好嵌套在一起的宽度 = 2*(35/2 + CONN_POINT_DIST) = 40。
-// 当 COMBO_NEST_K=0 时，45度件 x+ 贴合点在 [2.5,0,0]、L 件 x+ 在 [D-OFF,0,0] 与之一致（贴合面平齐、无多余短柱外露）。
-// 增大 COMBO_NEST_K：L 件（立杆端）向内侧水平内缩 → 组合横向更紧凑、屋顶立杆水平间距 W1 减小；
-// 减小则更松弛、W1 增大。每增 1cm 两个对称立杆各内缩 1cm ⇒ W1 整体收窄 2cm。
-// ⚠️ 上轮仅参数化默认仍为 0（无效果），现给出生效默认值使立杆内收对齐底框(约 35杆+2L 基准)。
-// 物理约束：两球心距 = 5 - K，两球半径各 2.5，K 最大不宜超过 1.6 以免中心球过度交叠。
-const COMBO_NEST_K = 1.0; // 贴合深度内缩量（cm），默认 1.0 ⇒ L 件立杆端内缩 1cm、两球心距 4cm
+// SketchUp 屋顶模型实测：球半径25mm、水平套筒68.198mm。
+// 两球中心距118.198mm，L凸头插入水平套筒，斜杆肩部距球心75mm。
+const COMBO_CENTER_DISTANCE = 5 + NEST_COMBO_SOCKET_LENGTH;
 
 // ===== 一体式45°L内收转接件：立杆接口相对斜杆接口的水平内收量（cm）=====
 // 屋顶推导结论：斜杆45°(bar-35)水平投影 24.7 - 框架半宽 20 ≈ 4.7，须由转接件把立杆端向内侧(靠屋顶中心)内收，
@@ -213,21 +225,21 @@ export const PARTS_LIBRARY: PartDefinition[] = [
     id: 'connector-45deg-nest',
     name: '45度两通(嵌套端)',
     category: 'connector',
-    size: { width: SOCKET_EXTENT * 1.7, height: SOCKET_EXTENT * 1.7, depth: CENTER_DIAMETER },
+    size: { width: 2 * (CONN_POINT_DIST + NEST_COMBO_SOCKET_LENGTH), height: 2 * ((NEST_SLOPE_SHOULDER + 5) * Math.SQRT1_2 + CONN_POINT_DIST), depth: CENTER_DIAMETER },
     colors: CONNECTOR_COLORS,
     defaultColor: 'black',
     description: '45° 角连接件（内含一个嵌套大套筒端，仅用于 45°L 嵌套组合内部，不作为独立配件）',
     connectorSpec: {
       socketDiameter: SOCKET_DIAMETER,
-      socketLength: SOCKET_INSERT_LEN,
+      socketLength: 5,
       socketWallThickness: SOCKET_WALL,
       centerDiameter: CENTER_DIAMETER,
     },
     connectionPoints: [
-      // x+：嵌套大套筒端（female），朝 +X 水平向右，套在 L 两通的水平 male 端上（贴合点内缩 COMBO_NEST_K）
-      cp('x+', [CONN_POINT_DIST - COMBO_NEST_K, 0, 0], DX, 'female'),
-      // up45：正常尺寸 male 端，与 x+ 成 45° 锐角（朝右上方），用于生长斜杆
-      cp('up45', [CONN_POINT_DIST * Math.SQRT1_2, CONN_POINT_DIST * Math.SQRT1_2, 0], D45, 'male'),
+      // 水平套筒口是内部嵌套贴合面，与 L 件凸头根部对齐。
+      cp('x+', [CONN_POINT_DIST + NEST_COMBO_SOCKET_LENGTH, 0, 0], DX, 'female'),
+      // 斜向肩部距球心75mm，后接50mm插入段。
+      cp('up45', [NEST_SLOPE_SHOULDER * Math.SQRT1_2, NEST_SLOPE_SHOULDER * Math.SQRT1_2, 0], D45, 'male'),
     ],
   },
   {
@@ -419,6 +431,28 @@ export const PARTS_LIBRARY: PartDefinition[] = [
       cp('z-', [0, 0, -CONN_POINT_DIST], DZ_NEG),
     ],
   },
+  {
+    id: 'connector-slide-strap',
+    name: '滑梯绑带',
+    category: 'connector',
+    size: { width: 2.8, height: SLIDE_STRAP_OUTER_DIAMETER, depth: SLIDE_STRAP_RAIL_SPACING + SLIDE_STRAP_OUTER_DIAMETER },
+    colors: CONNECTOR_COLORS,
+    defaultColor: 'black',
+    description: '绕过平台与滑梯入口两根平行圆管的配套织带',
+    extension: true,
+    extKind: 'slide-strap',
+  },
+  {
+    id: 'connector-bridge-rope',
+    name: '吊桥挂绳',
+    category: 'connector',
+    size: { width: 15, height: 45, depth: 1.5 },
+    colors: CONNECTOR_COLORS,
+    defaultColor: 'black',
+    description: '吊桥踏板圆管与框架扶手之间的挂绳',
+    extension: true,
+    extKind: 'bridge-rope',
+  },
   // ============ 平台板 ============
   // 平台板厚度 2cm，底部有折边（向下突出），折边恰好卡在四根杆件组成的矩形内
   {
@@ -479,7 +513,7 @@ export const PARTS_LIBRARY: PartDefinition[] = [
     id: 'ext-bar-wheel',
     name: '方向盘杆 35CM',
     category: 'bar',
-    size: { width: 35, height: 16, depth: 16 },
+    size: { width: 35, height: 8.52, depth: 24.74 },
     colors: PART_COLORS,
     defaultColor: 'white',
     description: '35CM 圆管上固定一个亮黄色三辐方向盘，两端可插连接件',
@@ -523,7 +557,7 @@ export const PARTS_LIBRARY: PartDefinition[] = [
     size: { width: 40, height: 25, depth: 40 },
     colors: PART_COLORS,
     defaultColor: 'yellow',
-    description: '黄色方形布兜 40×40，兜深约 25cm，四角绳扣挂于顶部圆管、不到框架底，不含架子',
+    description: '方形拉链布兜，适配 40×40cm 框格。四边布套包裹顶部圆管，兜底悬空，不含架子。',
     extension: true,
     extKind: 'pouch',
     platformSpec: {
@@ -538,7 +572,7 @@ export const PARTS_LIBRARY: PartDefinition[] = [
     id: 'ext-plate-rainbow',
     name: '彩虹门',
     category: 'platform',
-    size: { width: 40, height: 40, depth: 10 },
+    size: { width: 40, height: 4.86, depth: 44.86 },
     colors: PART_COLORS,
     defaultColor: 'white',
     description: '彩虹织带门 40×40，多彩竖条装饰扉',
@@ -552,6 +586,48 @@ export const PARTS_LIBRARY: PartDefinition[] = [
       rimThickness: 0.4,
     },
   },
+  ...[60, 80].map((height): PartDefinition => ({
+    id: `ext-plate-rainbow-${height}`,
+    name: `彩虹门 40 × ${height} cm`,
+    category: 'platform',
+    size: { width: 40, height: 4.86, depth: height + 4.86 },
+    colors: PART_COLORS,
+    defaultColor: 'white',
+    description: `七色织带，安装在 40 × ${height} cm 竖向框格`,
+    extension: true,
+    extKind: 'rainbow',
+    platformSpec: { plateWidth: 40, plateDepth: height, plateThickness: 0.4, rimHeight: 2, rimThickness: 0.4 },
+    directPlacement: 'tall-rainbow-frame',
+  })),
+  ...[
+    { id: 'rings', name: '双吊环', height: 42, depth: 5 },
+    { id: 'swing', name: '布兜秋千', height: 57, depth: 31 },
+  ].map(({ id, name, height, depth }): PartDefinition => ({
+    id: `special-${id}`,
+    name,
+    category: 'platform',
+    size: { width: 34, height, depth },
+    colors: PART_COLORS,
+    defaultColor: 'yellow',
+    description: '吊挂在下方留空的水平长圆管上',
+    extension: true,
+    extKind: id,
+    directPlacement: 'hanging-bar',
+  })),
+  ...[{ rise: 60, run: 125, innerWidth: 30 }, { rise: 80, run: 145, innerWidth: 32.5 }]
+    .map((slideSpec): PartDefinition => ({
+      id: `special-molded-slide-${slideSpec.rise}`,
+      name: `一体滑梯 ${slideSpec.rise} cm 高`,
+      category: 'platform',
+      size: { width: slideSpec.innerWidth + 7, height: slideSpec.rise + 12, depth: slideSpec.run },
+      colors: PART_COLORS,
+      defaultColor: 'red',
+      description: `高 ${slideSpec.rise} cm · 长 ${slideSpec.run} cm · 内宽 ${slideSpec.innerWidth} cm`,
+      extension: true,
+      extKind: 'molded-slide',
+      directPlacement: 'molded-slide',
+      slideSpec,
+    })),
   {
     id: 'ext-plate-honeycomb',
     name: '蜂巢板',
@@ -630,8 +706,8 @@ export const PARTS_LIBRARY: PartDefinition[] = [
     category: 'platform',
     size: { width: 39.5, height: 3, depth: 39.5 },
     colors: PART_COLORS,
-    defaultColor: 'white',
-    description: '数字认知迷宫板，红色边框 + 原木色滑块滑槽',
+    defaultColor: 'mint',
+    description: '数字认知迷宫板，可换色底板与原木色滑槽面板',
     extension: true,
     extKind: 'maze',
     platformSpec: {
@@ -751,34 +827,76 @@ export const PARTS_LIBRARY: PartDefinition[] = [
       rimThickness: 0.4,
     },
   },
+  {
+    id: 'platform-trampoline-80',
+    name: '双格蹦床垫',
+    category: 'platform',
+    size: { width: 80, height: 5, depth: 80 },
+    colors: PART_COLORS,
+    defaultColor: 'graphite',
+    description: '直接吸附到空的 80 × 80 cm 水平框架',
+    extension: true,
+    extKind: 'trampoline-80',
+    directPlacement: 'trampoline-frame',
+  },
+  {
+    id: 'platform-rope-bridge',
+    name: '绳索悬挂踏板',
+    category: 'platform',
+    size: { width: 40, height: 42, depth: 40 },
+    colors: PART_COLORS,
+    defaultColor: 'mint',
+    description: '用两侧绳索吊挂的踏板',
+    extension: true,
+    extKind: 'rope-bridge',
+  },
+  {
+    id: 'platform-long-rope-bridge',
+    name: '双跨悬索桥',
+    category: 'platform',
+    size: { width: 40, height: 42, depth: 80 },
+    colors: PART_COLORS,
+    defaultColor: 'mint',
+    extension: true,
+    extKind: 'long-rope-bridge',
+  },
+  {
+    id: 'platform-balance-bridge',
+    name: '悬挂独木桥',
+    category: 'platform',
+    size: { width: 40, height: 42, depth: 80 },
+    colors: PART_COLORS,
+    defaultColor: 'mint',
+    extension: true,
+    extKind: 'balance-bridge',
+  },
+  {
+    id: ROOF_PANEL_ID,
+    name: '三角屋面板',
+    category: 'platform',
+    size: { width: 40, height: PLATE_THICKNESS, depth: 30 },
+    colors: PART_COLORS,
+    defaultColor: 'mint',
+    description: '由三角斜框格自动生成，边长随屋面调整',
+    extension: true,
+    extKind: 'roof-triangle',
+  },
 ];
 
 // ===== 扩展杆件/扩展板件分组（供 RightPanel"扩展配件"选项卡使用）=====
 export const EXT_BARS = PARTS_LIBRARY.filter((p) => p.extension && p.category === 'bar');
-export const EXT_PLATES = PARTS_LIBRARY.filter((p) => p.extension && p.category === 'platform');
+export const EXT_PLATES = PARTS_LIBRARY.filter((p) => p.extension && p.category === 'platform' && p.platformSpec && !p.directPlacement);
+export const SPECIAL_EXTENSIONS = PARTS_LIBRARY.filter(part => part.directPlacement);
 
-// ===== 45°L嵌套组合（放基本配件库，由两个独立连接件嵌套而成）=====
-// 形态参考（45度件工程图，左右镜像）：45度件(含大套筒 female 端)在右，L两通在左，二者水平嵌套贴合
-//   45度件 = 45° 两通套接形态（x- 处 female 大套筒端 朝 -X 水平向左，up45 male 端与其成 45° 锐角 朝左上方）
-//   L两通 x+ male 端经绕X轴π旋转后仍朝 +X 水平向右，套入 45度件的 x- female 大套筒内
-//   L两通 y+ male 端经绕X轴π旋转后朝 -Y 竖直向下，生长立杆
-//   立杆(内侧)位于斜杆接口(外侧45°)的水平内侧，对称于人字顶左右两侧
+// ===== 按《儿童攀爬架-屋顶.skp》校准的两件嵌套组合 =====
+// 本地 +X 指向屋脊内侧。L件在内侧，向下接立杆；45度件斜口向内上方。
 export const COMBO_45L: PresetUnit = {
-  id: 'combo-45l',
-  name: '45°L嵌套组合',
-  category: '连接件',
-  description: '45度件大套筒端(朝左) 套住 L两通右端；45度件左上方45°斜端生长斜杆，L两通朝下生长立杆',
+  id: 'combo-45l', name: '45°L嵌套组合', category: '连接件',
+  description: '按SketchUp屋顶接法：水平套筒嵌套L两通，内侧向下接立杆，斜口向屋脊上升45°',
   parts: [
-    // 子件：45度件(嵌套大套筒端) 在左，rotation 零：x+ female 套筒朝 +X 水平向右；up45 male 与其成 45° 朝右上方
-    //   x+ female 贴合点内缩 COMBO_NEST_K → [0,3.2,0]+[CONN_POINT_DIST-COMBO_NEST_K,0,0]=[2.5-K,3.2,0] 朝 +X
     { id: '__c45l_d', partId: 'connector-45deg-nest', position: [0, 3.2, 0], rotation: [0, 0, 0], colorId: 'black' },
-    // 父件：L两通 在右，绕Z轴旋转π：x+ male 端朝 -X 水平向左(套入45度件大套筒)，y+ male 经旋转朝 -Y 竖直向下(立杆)
-    //   L的 x+ 世界位置 = [LX,3.2,0]+Rzπ[2.5,0,0]=[LX-2.5,3.2,0] 朝 -X，需与45度件 x+ female 贴合点[2.5-K,3.2,0] 重合
-    //   → LX - 2.5 = (2.5 - COMBO_NEST_K)  ⇒  LX = (5 - COMBO_NEST_K)
-    { id: '__c45l_l', partId: 'connector-l', position: [5 - COMBO_NEST_K, 3.2, 0], rotation: [0, 0, Math.PI], colorId: 'black' },
+    { id: '__c45l_l', partId: 'connector-l', position: [COMBO_CENTER_DISTANCE, 3.2, 0], rotation: [0, 0, Math.PI], colorId: 'black' },
   ],
-  // 组合在水平方向(贴合轴 X)上的半宽：中心到 L 件球心(最左)距离。COMBO_NEST_K 增大 → L 件内收 → 组合更紧凑，W1 减小
-  // W2 基准 = 一个35cm杆 + 2个L件嵌套 = 2*(35/2 + CONN_POINT_DIST) = 40。调整此半宽可让 W1→W2
 };
 
 // 预设组合单元（当前配件库重构后暂空，后续可按新配件补充）
